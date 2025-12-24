@@ -293,7 +293,7 @@ function App() {
     <div className="min-h-screen bg-slate-50 text-slate-900">
       <Routes>
         <Route path="/" element={user ? (selectedCustomer ? (results ? <Navigate to="/results" /> : <Navigate to="/data-entry" />) : <Navigate to="/customers" />) : (isRegistering ? <Register onRegister={handleRegister} onSwitchToLogin={() => setIsRegistering(false)} /> : <Login onLogin={handleLogin} onSwitchToRegister={() => setIsRegistering(true)} />)} />
-        <Route path="/customers" element={user ? <CustomerManagement onSelectCustomer={handleSelectCustomer} /> : <Navigate to="/" />} />
+        <Route path="/customers" element={user ? <CustomerManagement onSelectCustomer={handleSelectCustomer} onLogout={handleLogout} /> : <Navigate to="/" />} />
         <Route path="/admin" element={user?.is_admin ? <AdminDashboard /> : <Navigate to="/" />} />
         <Route path="/data-entry" element={user && selectedCustomer ? (
           <div className="max-w-7xl mx-auto p-4 md:p-8 text-slate-900">

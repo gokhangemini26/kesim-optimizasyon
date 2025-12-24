@@ -2,11 +2,12 @@ import React, { useState, useEffect } from 'react'
 import { Plus, Users, Search, Edit2, Trash2, CheckCircle, ChevronRight, Loader2 } from 'lucide-react'
 import { supabase } from '../../supabase'
 
-export default function CustomerManagement({ onSelectCustomer }) {
+export default function CustomerManagement({ onSelectCustomer, onLogout }) {
     const [customers, setCustomers] = useState([])
     const [loading, setLoading] = useState(true)
     const [isAdding, setIsAdding] = useState(false)
     const [formData, setFormData] = useState({ name: '', enTolerance: 2, boyTolerance: 3 })
+    const [error, setError] = useState(null)
 
     const fetchCustomers = async () => {
         setLoading(true)
@@ -29,17 +30,23 @@ export default function CustomerManagement({ onSelectCustomer }) {
 
     const handleAdd = async (e) => {
         e.preventDefault()
-        const { data: { user } } = await supabase.auth.getUser()
-        if (user) {
-            const { error } = await supabase
+        setError(null)
+        try {
+            const { data: { user } } = await supabase.auth.getUser()
+            if (!user) throw new Error("Kullanıcı oturumu bulunamadı.")
+
+            const { error: insertError } = await supabase
                 .from('customers')
                 .insert([{ ...formData, user_id: user.id }])
 
-            if (!error) {
-                fetchCustomers()
-                setIsAdding(false)
-                setFormData({ name: '', enTolerance: 2, boyTolerance: 3 })
-            }
+            if (insertError) throw insertError
+
+            fetchCustomers()
+            setIsAdding(false)
+            setFormData({ name: '', enTolerance: 2, boyTolerance: 3 })
+        } catch (err) {
+            console.error('Error adding customer:', err)
+            setError(err.message || "Müşteri eklenirken bir hata oluştu.")
         }
     }
 
@@ -55,15 +62,23 @@ export default function CustomerManagement({ onSelectCustomer }) {
                     <h1 className="text-3xl font-extrabold text-slate-900">Müşteri Yönetimi</h1>
                     <p className="text-slate-500 mt-1">Siparişlerini yönetmek istediğiniz müşteriyi seçin veya yenisini ekleyin.</p>
                 </div>
-                {!isAdding && (
+                <div className="flex gap-3">
+                    {!isAdding && (
+                        <button
+                            onClick={() => setIsAdding(true)}
+                            className="bg-slate-900 hover:bg-slate-800 text-white font-extrabold py-3.5 px-8 rounded-2xl flex items-center gap-2 transition-all shadow-xl shadow-slate-200"
+                        >
+                            <Plus size={20} />
+                            Yeni Müşteri Ekle
+                        </button>
+                    )}
                     <button
-                        onClick={() => setIsAdding(true)}
-                        className="bg-slate-900 hover:bg-slate-800 text-white font-extrabold py-3.5 px-8 rounded-2xl flex items-center gap-2 transition-all shadow-xl shadow-slate-200"
+                        onClick={onLogout}
+                        className="bg-red-50 hover:bg-red-100 text-red-600 font-bold px-5 py-3.5 rounded-2xl transition-all border border-red-100"
                     >
-                        <Plus size={20} />
-                        Yeni Müşteri Ekle
+                        Çıkış Yap
                     </button>
-                )}
+                </div>
             </div>
 
             {isAdding && (
@@ -72,7 +87,13 @@ export default function CustomerManagement({ onSelectCustomer }) {
                         <h2 className="text-xl font-bold text-slate-900">Yeni Müşteri Oluştur</h2>
                         <button onClick={() => setIsAdding(false)} className="text-slate-400 hover:text-slate-600 font-medium">İptal</button>
                     </div>
+                    {error && (
+                        <div className="mb-6 p-4 bg-red-50 border border-red-100 text-red-600 text-sm rounded-xl font-medium">
+                            {error}
+                        </div>
+                    )}
                     <form onSubmit={handleAdd} className="grid grid-cols-1 md:grid-cols-4 gap-6 items-end">
+
                         <div className="space-y-1">
                             <label className="text-sm font-semibold text-slate-700">Müşteri Adı</label>
                             <input

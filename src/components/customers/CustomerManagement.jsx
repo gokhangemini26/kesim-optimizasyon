@@ -19,7 +19,15 @@ export default function CustomerManagement({ onSelectCustomer, onLogout }) {
                 .eq('user_id', user.id)
                 .order('name')
 
-            if (!error) setCustomers(data)
+            if (!error) {
+                // Map snake_case DB columns to camelCase frontend state
+                const formattedData = data.map(c => ({
+                    ...c,
+                    enTolerance: c.en_tolerance,
+                    boyTolerance: c.boy_tolerance
+                }))
+                setCustomers(formattedData)
+            }
         }
         setLoading(false)
     }
@@ -37,7 +45,12 @@ export default function CustomerManagement({ onSelectCustomer, onLogout }) {
 
             const { error: insertError } = await supabase
                 .from('customers')
-                .insert([{ ...formData, user_id: user.id }])
+                .insert([{
+                    name: formData.name,
+                    en_tolerance: formData.enTolerance,
+                    boy_tolerance: formData.boyTolerance,
+                    user_id: user.id
+                }])
 
             if (insertError) throw insertError
 

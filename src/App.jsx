@@ -208,35 +208,90 @@ function App() {
 
         if (!best) break
 
-        const markerSlots = {}
-        Object.entries(best.ratio).forEach(([sz, count]) => {
-          markerSlots[sz] = count * best.layers
+        // Initialize plan rows for each color with 0 layers
+        const colorAllocations = {}
+        Object.keys(currentDemands).forEach(color => {
+          colorAllocations[color] = { layers: 0, distinctNeed: 0 }
         })
 
-        const planRows = []
-        Object.entries(currentDemands).forEach(([color, demand]) => {
-          const rowQuantities = {}
-          let colorHasAnything = false
+        let remainingLayers = best.layers
 
-          Object.keys(markerSlots).forEach(sz => {
-            const take = Math.min(markerSlots[sz], demand[sz] || 0)
-            if (take > 0) {
-              rowQuantities[sz] = take
-              markerSlots[sz] -= take
-              currentDemands[color][sz] -= take
-              colorHasAnything = true
+        // Greedy Layer Allocation Loop
+        // We assign layers one by one to the color that "needs" it most
+        while (remainingLayers > 0) {
+          let bestColor = null
+          let maxNeedScore = -1
+
+          // Calculate "Need Score" for each color
+          Object.entries(currentDemands).forEach(([color, demandMap]) => {
+            // A color needs this layer if it has demand for the sizes in the marker
+            // Score = Sum of pieces it would effectively use from 1 layer of this marker
+            let score = 0
+            best.group.forEach(sz => {
+              if ((demandMap[sz] || 0) > 0) {
+                score += 1
+                // We could weight this by demand magnitude, but simple binary need (needs/doesn't need) 
+                // often balances better for "cleaning up" orders. 
+                // Let's use: Score = How many USEFUL pieces this layer provides.
+              }
+            })
+
+            // Refine Score: Prioritize colors that have higher remaining demand
+            if (score > 0) {
+              // Add a tie-breaker based on total remaining demand for these sizes
+              let totalRemaining = 0
+              best.group.forEach(sz => totalRemaining += (demandMap[sz] || 0))
+              score = score * 1000 + totalRemaining
+            }
+
+            if (score > maxNeedScore && score > 0) {
+              maxNeedScore = score
+              bestColor = color
             }
           })
 
-          if (colorHasAnything) {
-            let maxSectionLayers = 0
-            Object.entries(rowQuantities).forEach(([sz, qty]) => {
-              maxSectionLayers = Math.max(maxSectionLayers, Math.ceil(qty / best.ratio[sz]))
+          if (!bestColor) {
+            // No color needs what this marker produces anymore, but we have layers left.
+            // Force assign to the color with highest general demand or just first one to start filling
+            // In optimization, we usually stop here, but since 'best.layers' was calculated based on aggregate,
+            // we should find someone to take it.
+            // Let's pick the color with highest pending demand for ANY size in marker.
+            let maxGeneric = -1
+            Object.entries(currentDemands).forEach(([color, demandMap]) => {
+              let d = 0
+              best.group.forEach(sz => d += (demandMap[sz] || 0))
+              if (d > maxGeneric) { maxGeneric = d; bestColor = color }
+            })
+          }
+
+          if (bestColor) {
+            colorAllocations[bestColor].layers += 1
+            remainingLayers--
+
+            // Reduce demand for this assigned layer
+            // Note: A layer produces 'ratio[sz]' pieces for each size 'sz'
+            Object.entries(best.ratio).forEach(([sz, qtyPerLayer]) => {
+              currentDemands[bestColor][sz] = (currentDemands[bestColor][sz] || 0) - qtyPerLayer
+            })
+          } else {
+            // If absolutely no one wants it (all demands satisfied or negative), break to avoid infinite loop
+            // This might happen if best.layers was overshoot.
+            break;
+          }
+        }
+
+        const planRows = []
+        Object.entries(colorAllocations).forEach(([color, data]) => {
+          if (data.layers > 0) {
+            const rowQuantities = {}
+            // Calculate produced qtys for display: Layers * Marker Ratio
+            Object.entries(best.ratio).forEach(([sz, ratio]) => {
+              rowQuantities[sz] = data.layers * ratio
             })
 
             planRows.push({
               colors: color,
-              layers: maxSectionLayers,
+              layers: data.layers,
               quantities: rowQuantities
             })
           }

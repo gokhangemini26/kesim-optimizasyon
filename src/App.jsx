@@ -165,7 +165,7 @@ function App() {
     let cutNo = 1
 
     // --- Helper: Optimization Core Step ---
-    const findBestCut = (activeDemands, lotMetraj) => {
+    const findBestCut = (activeDemands, maxMetraj) => {
       // Calculate Global Demand & Global Tolerance for Active Set
       const globalDemand = {}
       const globalTolerance = {}

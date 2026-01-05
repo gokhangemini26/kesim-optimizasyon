@@ -17,12 +17,12 @@ app.add_middleware(
 )
 
 class OrderRow(BaseModel):
-    id: int
+    id: int | str | float
     color: str
     quantities: Dict[str, int] # { "32": 100, "34": 200 }
 
 class FabricLot(BaseModel):
-    id: str
+    id: str | int
     lot: str
     totalMetraj: float
     remainingMetraj: float

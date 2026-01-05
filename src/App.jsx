@@ -24,6 +24,7 @@ function App() {
   const [sizeConsumptions, setSizeConsumptions] = useState({})
   const [sizeType, setSizeType] = useState('TIP1')
   const [groupingResults, setGroupingResults] = useState(null)
+  const [loading, setLoading] = useState(false)
 
   useEffect(() => {
     // Check for existing session

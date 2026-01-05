@@ -133,42 +133,33 @@ function App() {
   }
 
   const handlePreparePlan = async (data) => {
-    const { orderRows, groupingResults, avgConsumption } = data
-    if (!groupingResults) { alert("Lütfen kumaşları gruplandırın!"); return; }
+    // We use fabricRows and orderRows from state directly (or passed data)
+    // data might contain local overrides, but we rely on state mostly
+    const { orderRows: passedOrders, avgConsumption } = data
+
+    // Use passed orders if available, else state
+    const currentOrders = passedOrders || orderRows
+
+    if (fabricRows.length === 0) { alert("Lütfen kumaş listesi ekleyin!"); return; }
+    if (currentOrders.length === 0) { alert("Lütfen sipariş ekleyin!"); return; }
 
     try {
-      setLoading(true) // Assuming you might have a loading state, or just use UI feedback
+      setLoading(true)
 
-      // Prepare Payload
+      // Prepare Payload matching backend new schema
       const payload = {
-        orderRows: orderRows.map(r => ({
+        orderRows: currentOrders.map(r => ({
           id: r.id,
           color: r.color,
           quantities: Object.fromEntries(Object.entries(r.quantities).map(([k, v]) => [k, parseInt(v) || 0]))
         })),
-        groupingResults: {
-          kalip1: (groupingResults.kalip1 || []).map(g => ({
-            ...g,
-            id: String(g.id),
-            remainingMetraj: parseFloat(g.totalMetraj),
-            totalMetraj: parseFloat(g.totalMetraj),
-            mold: 'KALIP - 1'
-          })),
-          kalip2: (groupingResults.kalip2 || []).map(g => ({
-            ...g,
-            id: String(g.id),
-            remainingMetraj: parseFloat(g.totalMetraj),
-            totalMetraj: parseFloat(g.totalMetraj),
-            mold: 'KALIP - 2'
-          })),
-          kalip3: (groupingResults.kalip3 || []).map(g => ({
-            ...g,
-            id: String(g.id),
-            remainingMetraj: parseFloat(g.totalMetraj),
-            totalMetraj: parseFloat(g.totalMetraj),
-            mold: 'KALIP - 3'
-          }))
-        },
+        fabrics: fabricRows.map(f => ({
+          id: String(f.id),
+          topNo: String(f.topNo),
+          lot: f.lot || '1',
+          shrinkageCode: f.shrinkageCode || 'E0 B0',
+          metraj: parseFloat(f.metraj) || 0
+        })),
         avgConsumption: parseFloat(avgConsumption) || 1.35
       }
 

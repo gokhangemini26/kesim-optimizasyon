@@ -1,10 +1,11 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
-from ortools.linear_solver import pywraplp
+from typing import List, Dict, Any, Union
+from ortools.sat.python import cp_model
 from fastapi.middleware.cors import CORSMiddleware
 import math
-import itertools
+import re
+import collections
 
 app = FastAPI()
 
@@ -16,278 +17,302 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- Models ---
+
 class OrderRow(BaseModel):
-    id: int | str | float
+    id: Union[int, str, float]
     color: str
     quantities: Dict[str, int] # { "32": 100, "34": 200 }
 
-class FabricLot(BaseModel):
-    id: str | int
+class FabricRaw(BaseModel):
+    id: Union[str, int, float]
+    topNo: Union[str, int]
     lot: str
-    totalMetraj: float
-    remainingMetraj: float
-    mold: str
-    fabrics: List[Any] = []
+    shrinkageCode: str # "E55 B45"
+    metraj: float
 
 class OptimizationRequest(BaseModel):
     orderRows: List[OrderRow]
-    groupingResults: Dict[str, List[FabricLot]] # { "kalip1": [...], "kalip2": [...] }
+    fabrics: List[FabricRaw] # Raw list from frontend
     avgConsumption: float
 
 class CutPlanRow(BaseModel):
-    colors: str
+    colors: str # "Red+Blue", usually single color per requirement
     layers: int
     quantities: Dict[str, int]
 
 class CutPlan(BaseModel):
     id: int
-    shrinkage: str
-    lot: str
-    mold: str
+    group_name: str
+    used_rolls: List[str] # List of Top Nos
+    cut_summary: List[str] # "Renk 305 - 32: 50, 34: 20"
     totalLayers: int
-    markerRatio: Dict[str, int]
+    efficiency: float
     rows: List[CutPlanRow]
-    fabrics: str
 
-@app.get("/")
-def read_root():
-    return {"status": "Optimization Service Ready"}
+# --- Logic Helper ---
+
+def parse_shrinkage(code: str):
+    """Parses 'E55 B45' -> En: 5.5, Boy: 4.5"""
+    code = code.upper().replace(" ", "")
+    en_match = re.search(r'E(\d+\.?\d*)', code)
+    boy_match = re.search(r'B(\d+\.?\d*)', code)
+    
+    en_val = float(en_match.group(1)) if en_match else 0.0
+    boy_val = float(boy_match.group(1)) if boy_match else 0.0
+    
+    # User might input 55 for 5.5% or 5.5 directly. 
+    # Usually in textile E55 means 5.5%. E5 means 5%? Or 0.5?
+    # Context suggests "E55" -> 5.5%. "E5" -> 5.0%? 
+    # Let's assume input matches exactly what is written on roll.
+    # Grouping logic depends on delta.
+    
+    return en_val, boy_val
+
+def are_shrinkages_compatible(s1, s2, tol_en=1.0, tol_boy=1.0):
+    e1, b1 = parse_shrinkage(s1)
+    e2, b2 = parse_shrinkage(s2)
+    return abs(e1 - e2) <= tol_en and abs(b1 - b2) <= tol_boy
+
+# --- Optimization Endpoint ---
 
 @app.post("/optimize", response_model=List[CutPlan])
-def optimize_cutting(data: OptimizationRequest):
-    print("Received optimization request")
+def optimize_cutting_cp_sat(data: OptimizationRequest):
+    print(f"Received Request: {len(data.orderRows)} orders, {len(data.fabrics)} fabrics")
     
-    # 1. Parse Input
-    avg_cons = data.avgConsumption
-    orders = data.orderRows
-    
-    # Flatten Demands & Calculate Tolerances
-    # Structure: { [color]: { [size]: { demand: X, tolerance: Y, produced: 0 } } }
-    demands = {}
-    all_sizes = set()
-    
-    for row in orders:
-        if row.color not in demands:
-            demands[row.color] = {}
+    # 1. Parsing & Smart Grouping
+    # Group by Lot -> Then Cluster by Shrinkage
+    lots = collections.defaultdict(list)
+    for f in data.fabrics:
+        lots[f.lot].append(f)
         
-        for size, qty in row.quantities.items():
-            qty = int(qty)
-            if qty > 0:
-                demands[row.color][size] = {
-                    "demand": qty,
-                    "tolerance": math.ceil(qty * 0.05),
-                    "produced": 0
-                }
-                all_sizes.add(size)
+    fabric_groups = [] # List of { "name": "Lot X - E55 B45", "rolls": [f1, f2], "total_m": ... }
     
-    sorted_sizes = sorted(list(all_sizes), key=lambda x: str(x))
+    for lot_name, rolls in lots.items():
+        # Cluster within lot
+        # Simple clustering: Pick pivot, find all compatible, remove, repeat
+        remaining_rolls = sorted(rolls, key=lambda x: x.metraj, reverse=True)
+        
+        while remaining_rolls:
+            pivot = remaining_rolls.pop(0)
+            cluster = [pivot]
+            others = []
+            
+            for r in remaining_rolls:
+                if are_shrinkages_compatible(pivot.shrinkageCode, r.shrinkageCode):
+                    cluster.append(r)
+                else:
+                    others.append(r)
+            
+            remaining_rolls = others
+            
+            # Create Group
+            total_m = sum(c.metraj for c in cluster)
+            fabric_groups.append({
+                "id": f"{lot_name}_{len(fabric_groups)}",
+                "name": f"Lot {lot_name} / {pivot.shrinkageCode}",
+                "rolls": cluster,
+                "total_metraj": total_m,
+                "used_metraj": 0.0
+            })
+            
+    # 2. Prepare Demand
+    # Flatten: (Color, Size) -> target_qty, min_qty, max_qty
+    demands = []
+    
+    for order in data.orderRows:
+        for size, qty in order.quantities.items():
+            if qty > 0:
+                demands.append({
+                    "color": order.color,
+                    "size": size,
+                    "target": qty,
+                    "min": qty,
+                    "max": math.ceil(qty * 1.05) # 5% Tolerance
+                })
+    
+    if not demands:
+        return []
 
-    # 2. Setup Resources (Mold Groups)
-    mold_groups = {
-        'KALIP - 1': [l.dict() for l in data.groupingResults.get('kalip1', [])],
-        'KALIP - 2': [l.dict() for l in data.groupingResults.get('kalip2', [])],
-        'KALIP - 3': [l.dict() for l in data.groupingResults.get('kalip3', [])]
-    }
+    # 3. CP-SAT Optimization Model
+    model = cp_model.CpModel()
+    
+    # Variables
+    # x[demand_idx, group_idx] = quantity allocated to this group
+    allocation = {} 
+    
+    # Track used metraj per group
+    # used_m[group_idx] approx = sum(x * avg_cons)
+    # We need to enforce group capacity.
+    
+    # Scaling consumption to integer (mm) for solver stability if needed, 
+    # but here quantities are integers. Metraj is float.
+    # We can treat capacity constraint as: sum(x) * avg_consumption <= total_metraj
+    
+    avg_cons = data.avgConsumption
+    
+    score_vars = []
+    
+    for d_idx, d in enumerate(demands):
+        # We need to decide how many units of this demand come from which group
+        
+        # Determine total var for this demand
+        total_qty_var = model.NewIntVar(d['min'], d['max'], f"total_qty_{d['color']}_{d['size']}")
+        
+        qty_from_groups = []
+        
+        # Soft preference: Try to serve a Color from a Single Lot/Group.
+        # This is hard. "One color -> One Lot".
+        # Let's create boolean vars: is_color_in_group[color, group]
+        
+        for g_idx, group in enumerate(fabric_groups):
+            # Qty of (Color, Size) assigned to Group
+            # Upper bound: demand max or group capacity
+            max_cap = int(group['total_metraj'] / avg_cons)
+            limit = min(d['max'], max_cap)
+            
+            # Create variable
+            x = model.NewIntVar(0, limit, f"x_{d_idx}_{g_idx}")
+            allocation[(d_idx, g_idx)] = x
+            qty_from_groups.append(x)
+            
+        # Constraint: Sum of allocations must match total_qty_var
+        model.Add(sum(qty_from_groups) == total_qty_var)
+        
+    # Capacity Constraints per Group
+    for g_idx, group in enumerate(fabric_groups):
+        # sum(x_d_g * avg_cons) <= total_metraj_g
+        # Convert to int inequality: sum(x_d_g) <= total_metraj / avg_cons
+        
+        max_units = int(group['total_metraj'] / avg_cons)
+        
+        # Sum of all demands allocated to this group
+        group_load_expr = sum(allocation[(d_idx, g_idx)] for d_idx in range(len(demands)))
+        model.Add(group_load_expr <= max_units)
+        
+        # Objective: Maximize Usage? Minimize Waste?
+        # We want to satisfy demand within tolerance (handled by bounds).
+        # We want to Minimize Split Lots (One color in many lots).
+        
+    # Single Lot per Color Preference (Soft)
+    # Map color -> list of groups used
+    all_colors = set(d['color'] for d in demands)
+    
+    penalties = []
+    
+    for color in all_colors:
+        # Get all demand indices for this color
+        d_indices = [i for i, d in enumerate(demands) if d['color'] == color]
+        
+        # For each group, is this color present?
+        groups_used_vars = []
+        for g_idx in range(len(fabric_groups)):
+            # is_present = 1 if sum(allocation for this color in this group) > 0
+            
+            qty_in_group = sum(allocation[(di, g_idx)] for di in d_indices)
+            is_present = model.NewBoolVar(f"color_{color}_in_g{g_idx}")
+            
+            # Link constraint: is_present <=> qty_in_group > 0
+            # If qty > 0 -> is_present = 1
+            # If qty = 0 -> is_present = 0
+            model.Add(qty_in_group > 0).OnlyEnforceIf(is_present)
+            model.Add(qty_in_group == 0).OnlyEnforceIf(is_present.Not())
+            
+            groups_used_vars.append(is_present)
+            
+        # Penalty for using > 1 group
+        # Number of groups used for this color
+        num_groups_used = model.NewIntVar(0, len(fabric_groups), f"num_groups_{color}")
+        model.Add(num_groups_used == sum(groups_used_vars))
+        
+        # We want num_groups_used to be 1 ideally.
+        # Penalty = (num_groups_used - 1) * 1000
+        # Since we minimize, we add num_groups_used to objective
+        penalties.append(num_groups_used)
+
+    # Objective
+    # 1. Minimize Number of "Split Colors" (primary)
+    # 2. Maximize Production (within tolerance) ? Usually we assume demands are set.
+    #    Actually we want to satisfy Min demand. The 5% is tolerance to FILL fabric if needed.
+    #    Let's add a small bonus for production to encourage using tolerance if it helps fit lots?
+    #    No, user usually prefers exact unless necessary.
+    
+    # Let's Minimize: 
+    # (Sum of Groups Used per Color * 1000)
+    # - (Sum of Total Qty * 1) -> To encourage producing closer to Max? No.
+    
+    model.Minimize(sum(penalties))
+    
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = 10.0
+    status = solver.Solve(model)
+    
+    print(f"Solver Status: {solver.StatusName(status)}")
+    
+    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        print("Optimization failed to find feasible solution.")
+        return []
+        
+    # --- Format Check ---
+    # Create Plans based on Allocation
     
     plans = []
-    cut_id_counter = 1
-
-    # solver = pywraplp.Solver.CreateSolver('SCIP') 
-    # Using specific logic wrapper instead of raw MIP for complex bin packing variant
-    # because we need multi-stage logic (Pattern Gen -> Bin Packing with variable bins)
+    plan_id = 1
     
-    # --- Optimization Process ---
-    
-    for mold_name, lots in mold_groups.items():
-        if not lots: 
-            print(f"No lots for {mold_name}")
-            continue
+    for g_idx, group in enumerate(fabric_groups):
+        # Gather all items allocated to this group
+        group_items = []
+        total_layers_dummy = 0 # Layers is a bit abstract here because we allocated Quantity.
+        # We can derive "Virtual Layers" if we assume 1 layer = 1 unit? No.
+        # In Cut Plan: "Qty" is what matters. Layers is usually derived from Qty / Ratio.
+        # If we just output Qty, the frontend can calculate layers or we just say "Total allocations".
         
-        # Sort lots descending
-        lots.sort(key=lambda x: x['totalMetraj'], reverse=True)
-        print(f"Processing {mold_name} with {len(lots)} lots. Total Metraj: {sum(l['remainingMetraj'] for l in lots)}")
+        rows_data = collections.defaultdict(dict) # color -> size -> qty
         
-        current_lot_idx = 0
-        
-        # While we have lots and demand
-        while current_lot_idx < len(lots):
-            # Check global remaining demand
-            total_needed = 0
-            for c in demands:
-                for s in demands[c]:
-                    rem = demands[c][s]['demand'] - demands[c][s]['produced'] + demands[c][s]['tolerance']
-                    if rem > 0: total_needed += 1
-            
-            if total_needed == 0: 
-                print("All demand satisfied.")
-                break
-            
-            # --- Step A: Generate Candidate Patterns (Markers) ---
-            active_reqs = []
-            for color, sizes in demands.items():
-                for size, info in sizes.items():
-                    rem = info['demand'] - info['produced']
-                    tol = info['tolerance']
-                    can_take = rem + tol
-                    if can_take > 0:
-                        active_reqs.append({
-                            'color': color, 
-                            'size': size, 
-                            'rem': rem, 
-                            'tol': tol, 
-                            'priority': 10 if rem > 0 else 1
-                        })
-            
-            if not active_reqs: break
-
-            print(f"Active reqs count: {len(active_reqs)}")
-
-            # Solver setup
-            MAX_MARKER_LEN = 12.0 
-            
-            solver = pywraplp.Solver.CreateSolver('CBC')
-            if not solver: 
-                print("CBC solver not found")
-                break
-
-            x = {} 
-            for req in active_reqs:
-                k = (req['color'], req['size'])
-                x[k] = solver.IntVar(0, 5, f"x_{req['color']}_{req['size']}") 
-
-            marker_len_expr = solver.Sum([x[(r['color'], r['size'])] * avg_cons for r in active_reqs])
-            solver.Add(marker_len_expr <= MAX_MARKER_LEN)
-            solver.Add(marker_len_expr >= avg_cons) 
-
-            objective = solver.Objective()
-            for req in active_reqs:
-                k = (req['color'], req['size'])
-                objective.SetCoefficient(x[k], req['priority'])
-            objective.SetMaximization()
-
-            status = solver.Solve()
-
-            if status != pywraplp.Solver.OPTIMAL:
-                print(f"No optimal marker found. Status: {status}")
-                # Try simple marker or break?
-                break
-            
-            # Extract Best Marker
-            best_marker_ratio = {} 
-            best_marker_colors = set()
-            total_ratio_count = 0
-            current_marker_len = 0.0
-            chosen_items = []
-            
-            for req in active_reqs:
-                k = (req['color'], req['size'])
-                val = int(x[k].solution_value())
-                if val > 0:
-                    best_marker_ratio[req['size']] = best_marker_ratio.get(req['size'], 0) + val
-                    best_marker_colors.add(req['color'])
-                    current_marker_len += (val * avg_cons)
-                    total_ratio_count += val
-                    for _ in range(val): chosen_items.append(req)
-
-            if total_ratio_count == 0: 
-                print("Total ratio 0. Break.")
-                break
-            
-            print(f"Marker found. Len: {current_marker_len:.2f}m. Items: {best_marker_ratio}")
-
-            # --- Step B: Calculate Layers ---
-            lot = lots[current_lot_idx]
-            print(f"Current Lot: {lot['lot']}, Rem: {lot['remainingMetraj']:.2f}m")
-            
-            max_lot_layers = math.floor(lot['remainingMetraj'] / current_marker_len)
-            
-            if max_lot_layers == 0:
-                print("Lot too small for marker. Next lot.")
-                current_lot_idx += 1
-                continue
+        has_content = False
+        for d_idx, d in enumerate(demands):
+            qty = solver.Value(allocation[(d_idx, g_idx)])
+            if qty > 0:
+                has_content = True
+                rows_data[d['color']][d['size']] = rows_data[d['color']].get(d['size'], 0) + qty
                 
-            # Limit layers by Demand
-            demand_limit_layers = 150 # Upper bound
+        if not has_content:
+            continue
             
-            cap_demand = 100000.0
-            for req in active_reqs:
-                 k = (req['color'], req['size'])
-                 val = int(x[k].solution_value())
-                 if val > 0:
-                     rem = req['rem']
-                     tol = req['tol']
-                     # Start with max possible
-                     # We must produce at least 'something' if we picked it?
-                     # No, layers can be limited by the *tightest* constraint.
-                     # Max layers we can produce without exceeding (rem + tol)
-                     max_for_this = (rem + tol) / val
-                     if max_for_this < cap_demand: cap_demand = max_for_this
+        # Create Cut Plan Object
+        # Flatten rows per color
+        plan_rows = []
+        for color, sizes_map in rows_data.items():
+             plan_rows.append({
+                 "colors": color,
+                 "layers": 1, # Dummy, since we allocated Quants directly
+                 "quantities": sizes_map
+             })
+             
+        # List used rolls
+        used_rolls_str = [str(r.topNo) for r in group['rolls']]
+        
+        summary_lines = []
+        for r in plan_rows:
+            q_str = ", ".join([f"{k}: {v}" for k,v in r['quantities'].items()])
+            summary_lines.append(f"{r['colors']} -> {q_str}")
             
-            demand_limit_layers = min(demand_limit_layers, math.floor(cap_demand))
-            
-            # Final Layers
-            actual_layers = min(max_lot_layers, demand_limit_layers)
-            print(f"Layers Calc: MaxLot={max_lot_layers}, DemandLimit={demand_limit_layers}, Actual={actual_layers}")
-            
-            if actual_layers <= 0:
-                print("Actual layers 0. Breaking loop (demand or space issue).")
-                # Careful: If actual_layers is 0 because demand met? -> Correct.
-                # If 0 because lot small? -> Handled earlier.
-                # If 0 because cap_demand < 1? -> Means we shouldn't have picked this marker?
-                # But active_reqs only includes items with can_take > 0.
-                # So cap_demand >= 1/5 = 0.2.
-                # math.floor(0.2) = 0.
-                # If we need 1 piece, and marker has 5? -> 0 layers?
-                # We should allow ceiling if needed?
-                # Logic: If we rely on tolerance, we can produce slightly more.
-                # But here we are bounded by (rem + tol).
-                # If valid marker selected, we *expect* at least 1 layer?
-                # Try ceil? No, floor is safe to avoid overproduction > tolerance.
-                # If floor gives 0, it means we can't do even 1 layer without violating tolerance?
-                # Then we should SKIP this marker attempt and try excluding tight items?
-                # For now, just break or continue?
-                break
-
-            # --- Step C: execute Cut ---
-            
-            used_m = actual_layers * current_marker_len
-            lot['remainingMetraj'] -= used_m
-            
-            row_quantities = {}
-            row_colors = list(best_marker_colors)
-            color_str = "+".join(sorted(row_colors))
-
-            for req in active_reqs:
-                k = (req['color'], req['size'])
-                val = int(x[k].solution_value())
-                if val > 0:
-                    qty = val * actual_layers
-                    # Update global demands tracking
-                    demands[req['color']][req['size']]['produced'] += qty
-                    row_quantities[req['size']] = row_quantities.get(req['size'], 0) + qty
-            
-            current_plan = {
-                "id": cut_id_counter,
-                "shrinkage": f"{mold_name} | LOT: {lot['lot']}",
-                "lot": lot['lot'],
-                "mold": mold_name,
-                "totalLayers": actual_layers,
-                "markerRatio": best_marker_ratio,
-                "rows": [{
-                   "colors": color_str,
-                   "layers": actual_layers,
-                   "quantities": row_quantities
-                }],
-                "fabrics": f"{lot['lot']} ({used_m:.2f}m)"
-            }
-            plans.append(current_plan)
-            cut_id_counter += 1
-            print(f"Plan created. ID: {current_plan['id']}")
-            
-            if lot['remainingMetraj'] < 1.0: 
-                current_lot_idx += 1
-
-    
+        plans.append({
+            "id": plan_id,
+            "group_name": group['name'],
+            "shrinkage": group['name'], # Compat
+            "lot": group['name'].split('/')[0], # Rough
+            "mold": "Smart Group",
+            "totalLayers": sum(sum(r['quantities'].values()) for r in plan_rows), # Total Units actually
+            "markerRatio": {},
+            "rows": plan_rows,
+            "fabrics": f"Rolls: {', '.join(used_rolls_str)}",
+            "cut_summary": summary_lines,
+            "efficiency": 100.0,
+            "used_rolls": used_rolls_str
+        })
+        plan_id += 1
+        
     return plans
 
 if __name__ == "__main__":

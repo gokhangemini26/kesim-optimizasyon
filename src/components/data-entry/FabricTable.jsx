@@ -12,8 +12,7 @@ export default function FabricTable({ rows, onUpdateRows, onGroupFabrics }) {
         const newRow = {
             id: Date.now(),
             topNo: rows.length + 1,
-            en: -1.5,
-            boy: -2,
+            shrinkageCode: 'E0 B0',
             lot: '1',
             metraj: 100
         }
@@ -36,19 +35,36 @@ export default function FabricTable({ rows, onUpdateRows, onGroupFabrics }) {
         const lines = clipboardData.split(/\r?\n/).filter(line => line.trim() !== '')
 
         const newRows = lines.map((line, index) => {
-            const parts = line.split(/\t/)
-            const safeParse = (val) => {
-                if (!val) return 0
-                return parseFloat(String(val).replace(',', '.')) || 0
+            const parts = line.split(/\t/) // Excel defaults to tabs
+
+            // Heuristic to detect if pasted data has split En/Boy or single string
+            // Case 1: 5 cols -> Top, En, Boy, Lot, Metraj
+            // Case 2: 4 cols -> Top, Shrinkage, Lot, Metraj
+
+            let shrinkCode = 'E0 B0'
+            let lot = '1'
+            let metraj = 0
+
+            if (parts.length >= 5) {
+                // Assume separate columns
+                const en = parts[1] || '0'
+                const boy = parts[2] || '0'
+                shrinkCode = `E${en} B${boy}`
+                lot = parts[3] || '1'
+                metraj = parseFloat((parts[4] || '0').replace(',', '.')) || 0
+            } else {
+                // Assume single column
+                shrinkCode = parts[1] || 'E0 B0'
+                lot = parts[2] || '1'
+                metraj = parseFloat((parts[3] || '0').replace(',', '.')) || 0
             }
 
             return {
                 id: Math.random() + Date.now(),
                 topNo: parts[0] || (rows.length + index + 1),
-                en: safeParse(parts[1]),
-                boy: safeParse(parts[2]),
-                lot: parts[3] || '1',
-                metraj: safeParse(parts[4])
+                shrinkageCode: shrinkCode,
+                lot: lot,
+                metraj: metraj
             }
         })
 
@@ -60,121 +76,120 @@ export default function FabricTable({ rows, onUpdateRows, onGroupFabrics }) {
     const totalMetraj = rows.reduce((sum, row) => sum + (parseFloat(row.metraj) || 0), 0)
 
     return (
-        <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden mt-8">
-            <div className="p-6 border-b border-slate-100 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-slate-50/50">
+        <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+            <div className="p-4 border-b border-gray-200 bg-gray-50 flex justify-between items-center">
                 <div>
-                    <h2 className="text-xl font-bold text-slate-900 flex items-center gap-2">
-                        BÖLÜM B: Kumaş Top Bilgileri
-                        <span className="text-xs font-medium bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full">Stok Verileri</span>
-                    </h2>
-                    <p className="text-sm text-slate-500 mt-1">Excel'den yapıştırabilir veya manuel ekleyebilirsiniz.</p>
+                    <h3 className="font-semibold text-gray-900 flex items-center gap-2">
+                        <Layers className="w-5 h-5 text-indigo-600" />
+                        Kumaş Listesi
+                    </h3>
+                    <p className="text-sm text-gray-500 mt-1">
+                        Toplam {rows.length} top, {totalMetraj.toFixed(2)}m kumaş
+                    </p>
                 </div>
-                <div className="flex gap-2 w-full md:w-auto">
-                    <button
-                        onClick={addRow}
-                        className="flex-1 bg-white hover:bg-slate-50 text-slate-700 font-bold py-2.5 px-4 rounded-xl border border-slate-200 flex items-center justify-center gap-2 transition-all shadow-sm"
-                    >
-                        <Plus size={18} />
-                        Top Ekle
-                    </button>
+                <div className="flex gap-2">
                     <button
                         onClick={clearRows}
-                        className="flex-1 bg-red-50 hover:bg-red-100 text-red-600 font-bold py-2.5 px-4 rounded-xl border border-red-200 flex items-center justify-center gap-2 transition-all shadow-sm"
+                        className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                        title="Listeyi Temizle"
                     >
-                        <Trash2 size={18} />
-                        Temizle
+                        <Trash2 size={20} />
                     </button>
                     <button
-                        onClick={onGroupFabrics}
-                        className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2.5 px-6 rounded-xl flex items-center justify-center gap-2 transition-all shadow-lg shadow-emerald-100"
+                        onClick={addRow}
+                        className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors"
                     >
-                        <Layers size={18} />
-                        ÇEKME BAZINDA GRUPLANDIR
+                        <Plus size={20} />
+                        <span>Top Ekle</span>
+                    </button>
+                    <button
+                        onClick={async () => {
+                            try {
+                                const text = await navigator.clipboard.readText();
+                                // Trigger paste logic manually if needed or just inform user
+                                alert("Lütfen tablo üzerine tıklayıp CTRL+V yapın.");
+                            } catch (err) { }
+                        }}
+                        className="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors"
+                    >
+                        <Clipboard size={20} />
+                        <span>Excel'den Yapıştır</span>
                     </button>
                 </div>
             </div>
 
-            <div
-                className="overflow-x-auto outline-none focus:ring-2 focus:ring-emerald-500/20"
-                onPaste={handlePaste}
-                tabIndex={0}
-            >
-                <table className="w-full text-center border-collapse">
-                    <thead>
-                        <tr className="bg-yellow-400 border-b border-yellow-500">
-                            <th className="p-4 font-black text-slate-900 uppercase tracking-wider border-r border-yellow-500">TOP NO</th>
-                            <th className="p-4 font-black text-slate-900 uppercase tracking-wider border-r border-yellow-500">EN</th>
-                            <th className="p-4 font-black text-slate-900 uppercase tracking-wider border-r border-yellow-500">BOY</th>
-                            <th className="p-4 font-black text-slate-900 uppercase tracking-wider border-r border-yellow-500">LOT</th>
-                            <th className="p-4 font-black text-slate-900 uppercase tracking-wider">METRAJ</th>
-                            <th className="p-4 w-12 bg-white border-l border-slate-100"></th>
+            <div className="overflow-x-auto">
+                <table className="w-full text-sm text-left">
+                    <thead className="text-xs text-gray-700 uppercase bg-gray-50">
+                        <tr>
+                            <th className="px-4 py-3 w-16">Top No</th>
+                            <th className="px-4 py-3">Lot No</th>
+                            <th className="px-4 py-3">Çekme (E/B)</th>
+                            <th className="px-4 py-3 text-right">Metraj (m)</th>
+                            <th className="px-4 py-3 w-10"></th>
                         </tr>
                     </thead>
-                    <tbody>
+                    <tbody className="divide-y divide-gray-200" onPaste={handlePaste}>
                         {rows.length === 0 ? (
                             <tr>
-                                <td colSpan={6} className="p-12 text-center text-slate-400 italic bg-slate-50/30">
-                                    Henüz top verisi yok. Excel'den kopyalayıp buraya yapıştırın veya 'Top Ekle' butonunu kullanın.
+                                <td colSpan="5" className="px-4 py-8 text-center text-gray-500">
+                                    Henüz kumaş eklenmedi. Excel'den veri yapıştırabilir veya manuel ekleyebilirsiniz.
                                 </td>
                             </tr>
-                        ) : rows.map((row, rowIndex) => (
-                            <tr key={row.id} className="border-b border-slate-100 hover:bg-slate-50 transition-colors group">
-                                <td className="p-2 border-r border-slate-100 bg-yellow-400/10 font-black">
-                                    <input
-                                        type="text"
-                                        className="w-full bg-transparent border-none p-2 text-center focus:ring-0 font-black text-slate-900"
-                                        value={row.topNo}
-                                        onChange={(e) => handleCellChange(rowIndex, 'topNo', e.target.value)}
-                                    />
-                                </td>
-                                <td className="p-2 border-r border-slate-100">
-                                    <input
-                                        type="number"
-                                        step="0.1"
-                                        className="w-full bg-transparent border-none p-2 text-center focus:ring-2 focus:ring-emerald-500 rounded-lg outline-none font-bold text-slate-700"
-                                        value={row.en}
-                                        onChange={(e) => handleCellChange(rowIndex, 'en', parseFloat(e.target.value) || 0)}
-                                    />
-                                </td>
-                                <td className="p-2 border-r border-slate-100">
-                                    <input
-                                        type="number"
-                                        step="0.1"
-                                        className="w-full bg-transparent border-none p-2 text-center focus:ring-2 focus:ring-emerald-500 rounded-lg outline-none font-bold text-slate-700"
-                                        value={row.boy}
-                                        onChange={(e) => handleCellChange(rowIndex, 'boy', parseFloat(e.target.value) || 0)}
-                                    />
-                                </td>
-                                <td className="p-2 border-r border-slate-100 font-bold">
-                                    <input
-                                        type="text"
-                                        className="w-full bg-transparent border-none p-2 text-center focus:ring-0 outline-none uppercase font-bold text-slate-700"
-                                        value={row.lot}
-                                        onChange={(e) => handleCellChange(rowIndex, 'lot', e.target.value)}
-                                    />
-                                </td>
-                                <td className="p-2 font-black">
-                                    <input
-                                        type="number"
-                                        step="0.01"
-                                        className="w-full bg-transparent border-none p-2 text-center focus:ring-2 focus:ring-emerald-500 rounded-lg outline-none font-black text-slate-900"
-                                        value={row.metraj}
-                                        onChange={(e) => handleCellChange(rowIndex, 'metraj', e.target.value)}
-                                    />
-                                </td>
-                                <td className="p-2 text-center">
-                                    <button onClick={() => removeRow(row.id)} className="text-slate-300 hover:text-red-500 transition-colors">
-                                        <Trash2 size={18} />
-                                    </button>
-                                </td>
-                            </tr>
-                        ))}
+                        ) : (
+                            rows.map((row, index) => (
+                                <tr key={row.id} className="bg-white hover:bg-gray-50 group">
+                                    <td className="px-4 py-2">
+                                        <input
+                                            type="text"
+                                            value={row.topNo}
+                                            onChange={(e) => handleCellChange(index, 'topNo', e.target.value)}
+                                            className="w-full bg-transparent border-0 focus:ring-0 p-0 font-medium text-gray-900"
+                                        />
+                                    </td>
+                                    <td className="px-4 py-2">
+                                        <input
+                                            type="text"
+                                            value={row.lot}
+                                            onChange={(e) => handleCellChange(index, 'lot', e.target.value)}
+                                            className="w-full bg-transparent border-0 focus:ring-0 p-0"
+                                            placeholder="Lot"
+                                        />
+                                    </td>
+                                    <td className="px-4 py-2">
+                                        <input
+                                            type="text"
+                                            value={row.shrinkageCode}
+                                            onChange={(e) => handleCellChange(index, 'shrinkageCode', e.target.value)}
+                                            className="w-full bg-transparent border-0 focus:ring-0 p-0 font-mono text-indigo-600"
+                                            placeholder="E55 B45"
+                                        />
+                                    </td>
+                                    <td className="px-4 py-2 text-right">
+                                        <input
+                                            type="number"
+                                            value={row.metraj}
+                                            onChange={(e) => handleCellChange(index, 'metraj', parseFloat(e.target.value))}
+                                            className="w-full bg-transparent border-0 focus:ring-0 p-0 text-right"
+                                        />
+                                    </td>
+                                    <td className="px-4 py-2 text-center">
+                                        <button
+                                            onClick={() => removeRow(row.id)}
+                                            className="text-gray-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
+                                        >
+                                            <Trash2 size={16} />
+                                        </button>
+                                    </td>
+                                </tr>
+                            ))
+                        )}
                     </tbody>
                     {rows.length > 0 && (
-                        <tfoot className="bg-slate-900 text-white font-black">
+                        <tfoot className="bg-gray-100 text-gray-700 font-semibold">
                             <tr>
-                                <td className="p-4 text-left uppercase tracking-widest text-sm" colSpan={4}>TOPLAM METRAJ</td>
-                                <td className="p-4 text-xl">{totalMetraj.toFixed(2)}</td>
+                                <td className="px-4 py-3" colSpan="3">Toplam Metraj</td>
+                                <td className="px-4 py-3 text-right">{totalMetraj.toFixed(2)} m</td>
                                 <td></td>
                             </tr>
                         </tfoot>

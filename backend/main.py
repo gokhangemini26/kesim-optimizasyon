@@ -44,10 +44,15 @@ class CutPlanRow(BaseModel):
 class CutPlan(BaseModel):
     id: int
     group_name: str
-    used_rolls: List[str] # List of Top Nos
-    cut_summary: List[str] # "Renk 305 - 32: 50, 34: 20"
+    shrinkage: str = ""
+    lot: str = ""
+    mold: str = "Smart Group"
+    used_rolls: List[str]
+    fabrics: str = "" # legacy string support
+    cut_summary: List[str]
     totalLayers: int
     efficiency: float
+    markerRatio: Dict[str, int] = {}
     rows: List[CutPlanRow]
 
 # --- Logic Helper ---

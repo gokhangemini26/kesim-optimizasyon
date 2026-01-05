@@ -196,51 +196,30 @@ function App() {
         group.forEach(s => ratio[s] = (ratio[s] || 0) + 1)
 
         const candidateLayers = [80]
-
-        // Max layers constrained by (Demand + Tolerance)
         Object.keys(ratio).forEach(s => {
           const capacity = (globalDemand[s] || 0) + (globalTolerance[s] || 0)
-          if (capacity > 0) {
-            candidateLayers.push(Math.floor(capacity / ratio[s]))
-          } else {
-            candidateLayers.push(0)
-          }
+          candidateLayers.push(capacity > 0 ? Math.floor(capacity / ratio[s]) : 0)
         })
-        candidateLayers.push(Math.floor(lotMetraj / markerLen))
+        candidateLayers.push(Math.floor(maxMetraj / markerLen))
 
-        const uniqueLayers = [...new Set(candidateLayers)].filter(l => l > 0 && l <= 80 && l * markerLen <= lotMetraj)
+        const uniqueLayers = [...new Set(candidateLayers)].filter(l => l > 0 && l <= 80 && l * markerLen <= maxMetraj)
         if (uniqueLayers.length === 0) return
 
         uniqueLayers.forEach(layers => {
           let usefulPieces = 0
-          let overproducedPieces = 0 // Track tolerance usage separately
-
+          let overproducedPieces = 0
           let tempDemand = { ...globalDemand }
 
           group.forEach(sz => {
-            const produced = layers // 1 per group item * layers
-            const needed = Math.max(0, tempDemand[sz]) // Only count positive demand as "useful" primary
-
+            const produced = layers
+            const needed = Math.max(0, tempDemand[sz])
             const takeReal = Math.min(needed, produced)
             usefulPieces += takeReal
-
-            // Remaining produced goes to tolerance (checking if it fits is done by candidateLayers mostly, 
-            // but we score it less)
             overproducedPieces += (produced - takeReal)
-
             tempDemand[sz] -= produced
           })
 
           const uniqueness = new Set(group).size
-
-          // Score Strategy:
-          // 1. Maximize Real Demand (x1000)
-          // 2. Maximize Tolerance Usage (x100) -> Better to use tolerance than waste fabric? 
-          //    Actually user said "5% fazla keselim" implying it's desirable to fill lots.
-          //    But Real Demand is priority.
-          // 3. Length (x10)
-          // 4. Uniqueness (x1)
-
           const score = (usefulPieces * 1000) + (overproducedPieces * 50) + (group.length * 10) + uniqueness
 
           if (score > maxScore) {
@@ -253,143 +232,149 @@ function App() {
       return best
     }
 
-    // --- Helper: Apply Cut ---
-    const applyCut = (best, lot, activeDemands, specificColor = null) => {
-      const colorAllocations = {}
-      Object.keys(activeDemands).forEach(color => {
-        colorAllocations[color] = { layers: 0 }
-      })
+    // --- Process Each Mold Group ---
+    Object.entries(moldGroups).forEach(([moldName, lots]) => {
+      // Sort lots by size descending (helps to use big lots first)
+      lots.sort((a, b) => b.totalMetraj - a.totalMetraj)
 
-      let remainingLayers = best.layers
-
-      while (remainingLayers > 0) {
-        let bestColor = null
-        let maxNeedScore = -Infinity // Allow negative scores if we are filling tolerance
-
-        Object.entries(activeDemands).forEach(([color, demandMap]) => {
-          if (specificColor && color !== specificColor) return;
-
-          // Score this color's "need" for this layer
-          let realNeed = 0
-          let toleranceSpace = 0
-          let totalRemainingDemand = 0 // Tie-breaker for balance
-
-          best.group.forEach(sz => {
-            const current = demandMap[sz] || 0
-            const tol = toleranceMap[color][sz] || 0
-
-            if (current > 0) {
-              realNeed += 1
-              totalRemainingDemand += current
-            } else if (current > -tol) {
-              toleranceSpace += 1
-            }
-          })
-
-          // Calculate final score
-          let score = -Infinity
-
-          if (realNeed > 0 || toleranceSpace > 0) {
-            // Priority 1: Real Need
-            // Priority 2: Amount of remaining demand (Balanced Distribution)
-            // Priority 3: Ability to accept tolerance (Space)
-            score = (realNeed * 100000) + (totalRemainingDemand * 10) + (toleranceSpace * 1)
-          }
-
-          if (score > maxNeedScore && score > -Infinity) {
-            maxNeedScore = score
-            bestColor = color
-          }
-        })
-
-        if (!bestColor) {
-          // Logic to just dump it on anyone who fits if strictly needed?
-          // Should not happen due to candidateLayers check
-          break;
-        }
-
-        if (bestColor) {
-          colorAllocations[bestColor].layers += 1
-          remainingLayers--
-          Object.entries(best.ratio).forEach(([sz, qtyPerLayer]) => {
-            currentDemands[bestColor][sz] = (currentDemands[bestColor][sz] || 0) - qtyPerLayer
-          })
-        }
-      }
-
-      const planRows = []
-      Object.entries(colorAllocations).forEach(([color, data]) => {
-        if (data.layers > 0) {
-          const rowQuantities = {}
-          Object.entries(best.ratio).forEach(([sz, ratio]) => {
-            rowQuantities[sz] = data.layers * ratio
-          })
-          planRows.push({
-            colors: color,
-            layers: data.layers,
-            quantities: rowQuantities
-          })
-        }
-      })
-
-      plans.push({
-        id: cutNo++,
-        shrinkage: `${lot.mold} | LOT: ${lot.lot}`,
-        lot: lot.lot,
-        mold: lot.mold,
-        totalLayers: best.layers,
-        markerRatio: best.ratio,
-        rows: planRows,
-        fabrics: lot.fabrics.map(f => f.topNo).join(', ')
-      })
-
-      lot.remainingMetraj -= (best.layers * best.markerLen)
-    }
-
-    // --- PHASE 1: Dedicated Color-Lot Allocation ---
-    fabricLots.sort((a, b) => b.totalMetraj - a.totalMetraj)
-
-    const colors = Object.keys(currentDemands)
-
-    colors.forEach(color => {
-      fabricLots.forEach(lot => {
-        while (true) {
-          // Check if color has capacity (Demand > -Tolerance)
-          // Note: We check 'some' capacity, findBestCut will be more specific
-          const hasCapacity = Object.entries(currentDemands[color]).some(([sz, q]) => q > -(toleranceMap[color][sz] || 0))
-
-          if (!hasCapacity) break;
-          if (lot.remainingMetraj <= 0) break;
-
-          const singleColorDemand = { [color]: currentDemands[color] }
-          const best = findBestCut(singleColorDemand, lot.remainingMetraj)
-
-          if (best) {
-            applyCut(best, lot, currentDemands, color)
-          } else {
-            break
-          }
-        }
-      })
-    })
-
-    // --- PHASE 2: Mixed Remainder Allocation ---
-    fabricLots.forEach(lot => {
       while (true) {
+        // Calculate Total Available Metraj in this Group
+        let totalAvailable = lots.reduce((acc, l) => acc + l.remainingMetraj, 0)
+        if (totalAvailable <= 0) break;
+
+        // Check Global Demand
         const hasAnyCapacity = Object.keys(currentDemands).some(color =>
           Object.entries(currentDemands[color]).some(([sz, q]) => q > -(toleranceMap[color][sz] || 0))
         )
-
         if (!hasAnyCapacity) break;
-        if (lot.remainingMetraj <= 0) break;
 
-        const best = findBestCut(currentDemands, lot.remainingMetraj)
+        // Find Best Cut Plan for the ENTIRE Group resource
+        // We pretend we have one giant roll of 'totalAvailable' length
+        const best = findBestCut(currentDemands, totalAvailable)
+        if (!best) break;
 
-        if (best) {
-          applyCut(best, lot, currentDemands, null)
-        } else {
-          break
+        // Now check if we can actually execute this 'best' plan using sequential lots
+        // We need 'best.layers' amount. 
+        // Logic: We consume lots one by one until we get 'best.layers' * 'best.markerLen' total meters.
+
+        let layersToProduce = best.layers
+        const planLots = [] // Tracks which lots are used: { lot: '...', layers: 10 }
+        const colorAllocations = {} // Tracks what color we cut: { 'Red': { layers: 10, ... } }
+
+        // Initialize colorAllocations for logic
+        const colors = Object.keys(currentDemands)
+        colors.forEach(c => colorAllocations[c] = { layers: 0, fromLots: [] })
+
+        // We iterate lots and consume layers
+        for (let i = 0; i < lots.length; i++) {
+          const lot = lots[i]
+          if (lot.remainingMetraj < best.markerLen) continue; // Skip scrap lots < 1 marker length
+
+          // How many layers can this lot provide?
+          const maxLayersFromLot = Math.floor(lot.remainingMetraj / best.markerLen)
+          const takeLayers = Math.min(layersToProduce, maxLayersFromLot)
+
+          if (takeLayers > 0) {
+            // We take 'takeLayers' from this Lot
+            // Now, who gets these layers? (Which Color)
+            // Greedy Color Allocation FOR THIS SPECIFIC LOT's LAYERS
+
+            let lotLayersLeft = takeLayers
+            while (lotLayersLeft > 0) {
+              let bestColor = null
+              let maxNeedScore = -Infinity
+
+              Object.entries(currentDemands).forEach(([color, demandMap]) => {
+                let realNeed = 0
+                let toleranceSpace = 0
+                let totalRemainingDemand = 0
+
+                best.group.forEach(sz => {
+                  const current = demandMap[sz] || 0
+                  const tol = toleranceMap[color][sz] || 0
+                  if (current > 0) { realNeed += 1; totalRemainingDemand += current }
+                  else if (current > -tol) { toleranceSpace += 1 }
+                })
+
+                let score = -Infinity
+                if (realNeed > 0 || toleranceSpace > 0) {
+                  // Priority: Real Need > Balance > Tolerance
+                  // Add slight randomness or rotation to prevent sticking to same color if equal?
+                  // No, sticking is good (Single Lot per Color preference).
+                  score = (realNeed * 100000) + (totalRemainingDemand * 10) + (toleranceSpace * 1)
+                }
+                if (score > maxNeedScore) { maxNeedScore = score; bestColor = color }
+              })
+
+              if (bestColor) {
+                colorAllocations[bestColor].layers += 1
+                // Track which lot this color usage came from (for display/audit if needed)
+                // Note: We just update Demand here.
+                Object.entries(best.ratio).forEach(([sz, qtyPerLayer]) => {
+                  currentDemands[bestColor][sz] = (currentDemands[bestColor][sz] || 0) - qtyPerLayer
+                })
+                lotLayersLeft--
+              } else {
+                // Force assignment to first available if no one ideally wants it (filling tolerance or avoiding crash)
+                // Should be rare due to findBestCut logic
+                const anyColor = colors.find(c => Object.values(currentDemands[c]).some(q => q > -999))
+                if (anyColor) {
+                  colorAllocations[anyColor].layers += 1
+                  Object.entries(best.ratio).forEach(([sz, qtyPerLayer]) => {
+                    currentDemands[anyColor][sz] = (currentDemands[anyColor][sz] || 0) - qtyPerLayer
+                  })
+                  lotLayersLeft--
+                } else {
+                  break; // Should break outer loop really
+                }
+              }
+            }
+
+            planLots.push({ lot: lot.lot, layers: takeLayers, usedMetraj: takeLayers * best.markerLen })
+            lot.remainingMetraj -= (takeLayers * best.markerLen)
+            layersToProduce -= takeLayers
+          }
+
+          if (layersToProduce === 0) break;
         }
+
+        // If we couldn't fulfill ANY layers (e.g. lots too small for marker), avoid infinite loop
+        if (best.layers === layersToProduce) {
+          // Optimization found a plan but no lot could support even 1 layer?
+          // Break to avoid loop.
+          break;
+        }
+
+        // If we partially fulfilled (e.g. lots ran out), we still record the plan for what we did
+        const executedLayers = best.layers - layersToProduce
+        if (executedLayers === 0) break;
+
+        // Construct Plan Row Data
+        const planRows = []
+        Object.entries(colorAllocations).forEach(([color, data]) => {
+          if (data.layers > 0) {
+            const rowQuantities = {}
+            Object.entries(best.ratio).forEach(([sz, ratio]) => {
+              rowQuantities[sz] = data.layers * ratio
+            })
+            planRows.push({
+              colors: color,
+              layers: data.layers,
+              quantities: rowQuantities
+            })
+          }
+        })
+
+        plans.push({
+          id: cutNo++,
+          shrinkage: `${moldName}`,
+          lot: planLots.map(pl => pl.lot).join(', '), // Multi Lot Display
+          mold: moldName,
+          totalLayers: executedLayers,
+          markerRatio: best.ratio,
+          rows: planRows,
+          fabrics: planLots.map(pl => `${pl.lot} (${pl.layers})`).join(', ') // Detailed usage
+        })
       }
     })
 

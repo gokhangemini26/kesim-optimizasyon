@@ -265,7 +265,7 @@ export default function ResultsView({ plans, summary, onBack }) {
                                                         </td>
                                                     ))}
                                                     <td className="p-6 text-2xl font-black text-primary-600 bg-primary-50/20">
-                                                        {rowTotal}
+                                                        {rowTotal || 0}
                                                     </td>
                                                 </tr>
                                             )

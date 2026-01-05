@@ -147,9 +147,27 @@ function App() {
           quantities: Object.fromEntries(Object.entries(r.quantities).map(([k, v]) => [k, parseInt(v) || 0]))
         })),
         groupingResults: {
-          kalip1: groupingResults.kalip1 || [],
-          kalip2: groupingResults.kalip2 || [],
-          kalip3: groupingResults.kalip3 || []
+          kalip1: (groupingResults.kalip1 || []).map(g => ({
+            ...g,
+            id: String(g.id),
+            remainingMetraj: parseFloat(g.totalMetraj),
+            totalMetraj: parseFloat(g.totalMetraj),
+            mold: 'KALIP - 1'
+          })),
+          kalip2: (groupingResults.kalip2 || []).map(g => ({
+            ...g,
+            id: String(g.id),
+            remainingMetraj: parseFloat(g.totalMetraj),
+            totalMetraj: parseFloat(g.totalMetraj),
+            mold: 'KALIP - 2'
+          })),
+          kalip3: (groupingResults.kalip3 || []).map(g => ({
+            ...g,
+            id: String(g.id),
+            remainingMetraj: parseFloat(g.totalMetraj),
+            totalMetraj: parseFloat(g.totalMetraj),
+            mold: 'KALIP - 3'
+          }))
         },
         avgConsumption: parseFloat(avgConsumption) || 1.35
       }

@@ -104,17 +104,24 @@ export default function FabricGroupingModal({ results, onClose }) {
 
                 <div className="p-8 pt-4 overflow-y-auto flex-1 space-y-4">
                     <KalipTable
-                        title="KALIP - 1 (Tolerans İçi)"
+                        title="KALIP - 1 (0-5% Tolerans)"
                         data={results.kalip1}
                         totalMetraj={results.kalip1Total}
                         colorClass="bg-emerald-500"
                     />
 
                     <KalipTable
-                        title="KALIP - 2 (Tolerans Dışı)"
+                        title="KALIP - 2 (5-10% Tolerans)"
                         data={results.kalip2}
                         totalMetraj={results.kalip2Total}
                         colorClass="bg-amber-500"
+                    />
+
+                    <KalipTable
+                        title="KALIP - 3 (10-15% Tolerans)"
+                        data={results.kalip3}
+                        totalMetraj={results.kalip3Total}
+                        colorClass="bg-rose-500"
                     />
                 </div>
 
@@ -122,7 +129,7 @@ export default function FabricGroupingModal({ results, onClose }) {
                     <div className="flex gap-8">
                         <div className="flex flex-col">
                             <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">GENEL TOPLAM</span>
-                            <span className="text-3xl font-black text-slate-900">{(results.kalip1Total + results.kalip2Total).toFixed(2)} m</span>
+                            <span className="text-3xl font-black text-slate-900">{(results.kalip1Total + results.kalip2Total + results.kalip3Total).toFixed(2)} m</span>
                         </div>
                     </div>
                     <button

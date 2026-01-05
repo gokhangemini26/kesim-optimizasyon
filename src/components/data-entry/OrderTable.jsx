@@ -38,6 +38,12 @@ export default function OrderTable({ sizeType, rows, onUpdateRows }) {
         onUpdateRows(rows.filter(r => r.id !== id))
     }
 
+    const clearRows = () => {
+        if (window.confirm('Tüm satırları silmek istediğinize emin misiniz?')) {
+            onUpdateRows([])
+        }
+    }
+
     const handlePaste = (e) => {
         e.preventDefault()
         const clipboardData = e.clipboardData.getData('Text')
@@ -92,6 +98,13 @@ export default function OrderTable({ sizeType, rows, onUpdateRows }) {
                     >
                         <Plus size={18} />
                         Satır Ekle
+                    </button>
+                    <button
+                        onClick={clearRows}
+                        className="bg-red-50 hover:bg-red-100 text-red-600 font-bold py-2 px-4 rounded-xl border border-red-200 flex items-center gap-2 transition-all shadow-sm"
+                    >
+                        <Trash2 size={18} />
+                        Verileri Temizle
                     </button>
                 </div>
             </div>

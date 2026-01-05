@@ -99,10 +99,13 @@ def optimize_cutting(data: OptimizationRequest):
     # --- Optimization Process ---
     
     for mold_name, lots in mold_groups.items():
-        if not lots: continue
+        if not lots: 
+            print(f"No lots for {mold_name}")
+            continue
         
         # Sort lots descending
         lots.sort(key=lambda x: x['totalMetraj'], reverse=True)
+        print(f"Processing {mold_name} with {len(lots)} lots. Total Metraj: {sum(l['remainingMetraj'] for l in lots)}")
         
         current_lot_idx = 0
         
@@ -114,22 +117,17 @@ def optimize_cutting(data: OptimizationRequest):
                 for s in demands[c]:
                     rem = demands[c][s]['demand'] - demands[c][s]['produced'] + demands[c][s]['tolerance']
                     if rem > 0: total_needed += 1
-            if total_needed == 0: break
+            
+            if total_needed == 0: 
+                print("All demand satisfied.")
+                break
             
             # --- Step A: Generate Candidate Patterns (Markers) ---
-            # Generate valid size combinations that fit within constraints (max length usually defined by table, say 10m-20m or simpler logic)
-            # OR-Tools CSP (Cutting Stock Problem) Formulation
-            
-            # Simplified approach for "Marker Generation" embedded in a greedy-with-solver loop:
-            # We select a subset of active demands to form a marker.
-            
-            # 1. Gather active requirements
-            active_reqs = [] # (color, size, remaining_need, tolerance_room)
+            active_reqs = []
             for color, sizes in demands.items():
                 for size, info in sizes.items():
                     rem = info['demand'] - info['produced']
                     tol = info['tolerance']
-                    # Effective max we can take now
                     can_take = rem + tol
                     if can_take > 0:
                         active_reqs.append({
@@ -142,51 +140,25 @@ def optimize_cutting(data: OptimizationRequest):
             
             if not active_reqs: break
 
-            # 2. Create Solver for ONE Marker Optimization
-            # Goal: Find a Marker (ratio of sizes) and a Layer count that fits into available Lot(s)
-            # and maximizes "Priority" (Real demand) validation.
+            print(f"Active reqs count: {len(active_reqs)}")
 
-            # Heuristic: Filter for sizes that actually match current lot's potential? 
-            # (Assuming all colors in mold group are compatible with lot)
-            
-            # Let's use the SCIP solver to find best pattern * layers for the current head lot(s).
-            # We treat the available sequential lots as a seamless resource for this cut.
-            
-            # Calculate available metraj in current Lot sequence
-            # (Limitation: Marker length cannot exceed LOT length if we don't splice. 
-            #  User said "Hangi kumas topunu kullaniyorsa...". 
-            #  Ideally we assume we can run continuously or we are limited by table length usually 6-10m.
-            #  Let's assume max marker length is 10m for physical table constraint)
+            # Solver setup
             MAX_MARKER_LEN = 12.0 
             
-            # Try to build a production plan using the biggest available continuous chunk? 
-            # Actually, standard industry practice: Marker is prepared (e.g. 5m). 
-            # Can be laid on Lot 1 (100m) -> 20 layers.
-            
-            solver = pywraplp.Solver.CreateSolver('SCIP')
+            solver = pywraplp.Solver.CreateSolver('CBC')
             if not solver: 
-                print("SCIP solver not found")
+                print("CBC solver not found")
                 break
 
-            # Variables: Count of each (Color, Size) in the Marker
-            # We limit total marker length <= MAX_MARKER_LEN
-            # We limited total pieces in marker (e.g. < 8 usually for table handling)
-            
-            x = {} # x[color, size] = count in marker
+            x = {} 
             for req in active_reqs:
                 k = (req['color'], req['size'])
-                x[k] = solver.IntVar(0, 5, f"x_{req['color']}_{req['size']}") # Max 5 of same size in one marker
+                x[k] = solver.IntVar(0, 5, f"x_{req['color']}_{req['size']}") 
 
-            # Constraint: Marker Length <= MAX_MARKER_LEN
             marker_len_expr = solver.Sum([x[(r['color'], r['size'])] * avg_cons for r in active_reqs])
             solver.Add(marker_len_expr <= MAX_MARKER_LEN)
-            solver.Add(marker_len_expr >= avg_cons) # Must create at least 1 piece
+            solver.Add(marker_len_expr >= avg_cons) 
 
-            # Constraint: Marker Count <= 8 (Visual/Handling constraint)
-            # solver.Add(solver.Sum(x.values()) <= 8)
-            
-            # Objective: Maximize Value
-            # Value = Priority (Real Demand) * Count
             objective = solver.Objective()
             for req in active_reqs:
                 k = (req['color'], req['size'])
@@ -196,10 +168,11 @@ def optimize_cutting(data: OptimizationRequest):
             status = solver.Solve()
 
             if status != pywraplp.Solver.OPTIMAL:
-                print("No optimal marker found")
+                print(f"No optimal marker found. Status: {status}")
+                # Try to force a simple marker if optimization fails?
                 break
-                
-            # Extract Best Marker
+            
+            print("Optimal marker found.")
             best_marker_ratio = {} # { "32": 2, "34": 1 } 
             best_marker_colors = set()
             total_ratio_count = 0

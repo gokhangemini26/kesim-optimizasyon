@@ -153,11 +153,13 @@ function App() {
     })
 
     // 2. Setup Lots
-    const fabricLots = [
-      ...groupingResults.kalip1.map(g => ({ ...g, mold: 'KALIP - 1', remainingMetraj: g.totalMetraj })),
-      ...groupingResults.kalip2.map(g => ({ ...g, mold: 'KALIP - 2', remainingMetraj: g.totalMetraj })),
-      ...(groupingResults.kalip3 || []).map(g => ({ ...g, mold: 'KALIP - 3', remainingMetraj: g.totalMetraj }))
-    ]
+    // 2. Setup Lot Groups (Pooled Resources)
+    // We group by Mold to allow Multi-Lot Cuts
+    const moldGroups = {
+      'KALIP - 1': groupingResults.kalip1.map(g => ({ ...g, remainingMetraj: g.totalMetraj })),
+      'KALIP - 2': groupingResults.kalip2.map(g => ({ ...g, remainingMetraj: g.totalMetraj })),
+      'KALIP - 3': (groupingResults.kalip3 || []).map(g => ({ ...g, remainingMetraj: g.totalMetraj }))
+    }
 
     const plans = []
     let cutNo = 1

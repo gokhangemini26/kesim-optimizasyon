@@ -309,49 +309,49 @@ function App() {
       const remainingSizes = Object.keys(globalDemand).filter(s => globalDemand[s].total > 0)
       if (remainingSizes.length === 0) break
 
-      const availableLot = fabricLots.find(lot => lot.totalMetraj > 0)
-      if (!availableLot) break
-
-      // Find best multi-color cut
+      // Find best multi-color cut across ALL lots
       let best = null
-      const validCuts = []
 
-      for (let sizeCount = Math.min(4, remainingSizes.length); sizeCount >= 1; sizeCount--) {
-        const combos = getCombinations(remainingSizes, sizeCount)
+      fabricLots.forEach(lot => {
+        if (lot.totalMetraj <= 0) return
 
-        for (const combo of combos) {
-          // Max layers = min of total demand across combo sizes
-          let maxLayersDemand = Infinity
-          for (const s of combo) {
-            maxLayersDemand = Math.min(maxLayersDemand, globalDemand[s].total)
+        for (let sizeCount = Math.min(4, remainingSizes.length); sizeCount >= 1; sizeCount--) {
+          const combos = getCombinations(remainingSizes, sizeCount)
+
+          for (const combo of combos) {
+            // Max layers = min of total demand across combo sizes
+            let maxLayersDemand = Infinity
+            for (const s of combo) {
+              maxLayersDemand = Math.min(maxLayersDemand, globalDemand[s].total)
+            }
+            if (maxLayersDemand === 0) continue
+
+            const markerLen = calcMarkerLen(combo)
+            if (markerLen === 0) continue
+            const maxLayersFabric = Math.floor(lot.totalMetraj / markerLen)
+
+            const targetLayers = Math.min(HARD_CAP, maxLayersDemand, maxLayersFabric)
+            if (targetLayers <= 0) continue
+
+            const candidate = {
+              lot,
+              group: combo,
+              markerLen,
+              targetLayers,
+              totalPieces: combo.length * targetLayers
+            }
+
+            if (!best || candidate.totalPieces > best.totalPieces) {
+              best = candidate
+            }
           }
-          if (maxLayersDemand === 0) continue
-
-          const markerLen = calcMarkerLen(combo)
-          if (markerLen === 0) continue
-          const maxLayersFabric = Math.floor(availableLot.totalMetraj / markerLen)
-
-          const targetLayers = Math.min(HARD_CAP, maxLayersDemand, maxLayersFabric)
-          if (targetLayers <= 0) continue
-
-          validCuts.push({
-            lot: availableLot,
-            group: combo,
-            markerLen,
-            targetLayers,
-            totalPieces: combo.length * targetLayers
-          })
         }
-      }
+      })
 
-      if (validCuts.length === 0) break
-
-      validCuts.sort((a, b) => b.totalPieces - a.totalPieces)
-      best = validCuts[0]
+      if (!best) break
 
       // Distribute layers to colors proportionally
       const planRows = []
-      let remainingLayers = best.targetLayers
 
       best.group.forEach(sz => {
         const sizeColors = globalDemand[sz].colors.sort((a, b) => b.qty - a.qty)
@@ -389,6 +389,69 @@ function App() {
         rows: planRows,
         fabrics: best.lot.fabrics.map(f => f.topNo).join(', '),
         note: `Phase2 (MultiColor): ${best.group.length}x @ ${best.targetLayers}L`
+      })
+    }
+
+    // PHASE 3: Absolute cleanup - complete EVERY remaining piece
+    // No restrictions, even 1-layer single-size cuts allowed
+    loopSafety = 0
+    while (loopSafety++ < 500) {
+      // Find any remaining demand
+      let foundDemand = false
+      let bestCleanup = null
+
+      Object.entries(currentDemands).forEach(([color, colorDemand]) => {
+        Object.entries(colorDemand).forEach(([sz, qty]) => {
+          if (qty <= 0) return
+          foundDemand = true
+
+          // Find any lot that can cut this
+          fabricLots.forEach(lot => {
+            if (lot.totalMetraj <= 0) return
+
+            const markerLen = calcMarkerLen([sz])
+            if (markerLen === 0) return
+            const maxLayersFabric = Math.floor(lot.totalMetraj / markerLen)
+
+            const targetLayers = Math.min(HARD_CAP, qty, maxLayersFabric)
+            if (targetLayers <= 0) return
+
+            if (!bestCleanup || targetLayers > bestCleanup.targetLayers) {
+              bestCleanup = {
+                color,
+                size: sz,
+                lot,
+                markerLen,
+                targetLayers
+              }
+            }
+          })
+        })
+      })
+
+      if (!foundDemand || !bestCleanup) break
+
+      // Execute cleanup cut
+      const { color, size, lot, markerLen, targetLayers } = bestCleanup
+
+      currentDemands[color][size] = Math.max(0, currentDemands[color][size] - targetLayers)
+      lot.totalMetraj -= (targetLayers * markerLen)
+
+      plans.push({
+        id: cutNo++,
+        shrinkage: `${lot.mold} | LOT: ${lot.lot}`,
+        lot: lot.lot,
+        mold: lot.mold,
+        totalLayers: targetLayers,
+        markerRatio: { [size]: 1 },
+        markerLength: markerLen.toFixed(2),
+        rows: [{
+          colors: color,
+          layers: targetLayers,
+          quantities: { [size]: targetLayers }
+        }],
+        fabrics: lot.fabrics.map(f => f.topNo).join(', '),
+        note: `Phase3 (Cleanup): ${size} x ${targetLayers}L`
       })
     }
 

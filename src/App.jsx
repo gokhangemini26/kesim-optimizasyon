@@ -249,7 +249,7 @@ function App() {
             selectionReason = 'Deep Single Lock'
           }
 
-          // SCORING
+          // SCORING - WITH COMBINATION PRIORITY
           let best = null
           let maxScore = -Infinity
 
@@ -274,7 +274,26 @@ function App() {
               if (remaining > 0 && remaining < 20) fragmentPenalty += 2000
             })
 
-            const score = (cutsSaved * 10000) + depthScore + (cand.totalPieces * 0.5) - shallowPenalty - fragmentPenalty
+            // NEW: COMBINATION PRIORITY BONUS
+            // Heavily reward candidates that include more unique sizes
+            // This encourages combining 31/32 + 32/32 + 33/32 into ONE cut vs separate cuts
+            const uniqueSizeCount = Object.keys(cand.ratio).length
+            const combinationBonus = uniqueSizeCount * 8000 // HUGE bonus per extra size
+
+            // Also bonus for finishing sizes completely (no remainders)
+            let completionBonus = 0
+            Object.entries(cand.ratio).forEach(([s, r]) => {
+              const remaining = (colorDemand[s] || 0) - (cand.targetLayers * r)
+              if (remaining === 0) completionBonus += 3000 // Finished this size
+            })
+
+            const score = (cutsSaved * 10000)
+              + depthScore
+              + combinationBonus              // NEW: Favor more sizes
+              + completionBonus               // NEW: Favor finishing sizes
+              + (cand.totalPieces * 0.5)
+              - shallowPenalty
+              - fragmentPenalty
 
             if (score > maxScore) {
               maxScore = score

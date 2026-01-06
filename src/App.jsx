@@ -212,183 +212,243 @@ function App() {
         String(a).localeCompare(String(b), undefined, { numeric: true })
       )
 
-      // 3-PHASE EXECUTION STRATEGY
-      const PHASES = [
-        { name: 'PHASE 1 (DEEP)', minLayers: 40 },
-        { name: 'PHASE 2 (BALANCE)', minLayers: 15 },
-        { name: 'PHASE 3 (CLEANUP)', minLayers: 0 }
-      ];
+      let loopSafety = 0
+      while (loopSafety++ < 500) {
+        // 1. Kumaş Kontrolü
+        const viableGroups = allFabricGroups.filter(g => g.totalMetraj > 0)
+        if (viableGroups.length === 0) break
 
-      for (const phase of PHASES) {
-        let phaseLoopSafety = 0
-        while (phaseLoopSafety++ < 200) {
-          // 1. Kumaş Kontrolü
-          const viableGroups = allFabricGroups.filter(g => g.totalMetraj > 0)
-          if (viableGroups.length === 0) break
+        // En büyük grubu seç
+        viableGroups.sort((a, b) => b.totalMetraj - a.totalMetraj)
+        const currentGroup = viableGroups[0]
 
-          // En büyük grubu seç
-          viableGroups.sort((a, b) => b.totalMetraj - a.totalMetraj)
-          const currentGroup = viableGroups[0]
+        // 2. Talep Kontrolü
+        const currentDemands = remainingDemands[color]
+        const totalRemaining = Object.values(currentDemands).reduce((a, b) => a + b, 0)
+        if (totalRemaining <= 0) break
 
-          // 2. Talep Kontrolü
-          const currentDemands = remainingDemands[color]
-          const totalRemaining = Object.values(currentDemands).reduce((a, b) => a + b, 0)
-          if (totalRemaining <= 0) break
+        // --- 6-POINT STRATEGY IMPLEMENTATION ---
 
-          // 3. ADAY KOMBİNASYONLARIN OLUŞTURULMASI
-          const activeSizes = colorSizes.filter(s => currentDemands[s] > 0)
-          if (activeSizes.length === 0) break
+        // A. Small Size Protection (Smart Candidate Gen)
+        const activeSizes = colorSizes.filter(s => currentDemands[s] > 0)
+        if (activeSizes.length === 0) break
 
-          const candidates = []
-          // A. TEKLİ (SAME)
+        // Core vs Fill identification
+        const maxDemand = Math.max(...activeSizes.map(s => currentDemands[s]))
+        const BIG_DEMAND_THRESHOLD = maxDemand * 0.35
+        const coreSizes = activeSizes.filter(s => currentDemands[s] >= BIG_DEMAND_THRESHOLD)
+        const fillSizes = activeSizes.filter(s => currentDemands[s] < BIG_DEMAND_THRESHOLD)
+
+        // Generate Candidates
+        const candidates = []
+
+        // 1. Single Core Sizes (Primary candidates for Same-Size Lock)
+        activeSizes.forEach(s => candidates.push([s]))
+
+        // 2. Core + Core
+        for (let i = 0; i < coreSizes.length; i++) {
+          for (let j = i; j < coreSizes.length; j++) {
+            candidates.push([coreSizes[i], coreSizes[j]])
+          }
+        }
+
+        // 3. Core + Fill (Limited fill)
+        if (fillSizes.length > 0) {
+          coreSizes.forEach(core => {
+            fillSizes.forEach(fill => {
+              candidates.push([core, fill]) // Pair
+              candidates.push([core, core, fill]) // Triple (Heavy Core)
+            })
+          })
+        }
+
+        // 4. Quad (Only if robust)
+        if (activeSizes.length >= 4 && totalRemaining > 150) {
+          // Mix best demands
+          const top = activeSizes.sort((a, b) => currentDemands[b] - currentDemands[a]).slice(0, 4)
+          candidates.push(top)
+        }
+
+        // Fallback: If no smart candidates (e.g. only fill sizes left), use all combos
+        if (candidates.length === 0 || (coreSizes.length === 0 && fillSizes.length > 0)) {
+          // Standard generation for cleanup
           activeSizes.forEach(s => candidates.push([s]))
-          // B. İKİLİ (PAIR)
           for (let i = 0; i < activeSizes.length; i++) {
             for (let j = i; j < activeSizes.length; j++) {
               candidates.push([activeSizes[i], activeSizes[j]])
             }
           }
-          // C. ÜÇLÜ (TRIPLE)
-          for (let i = 0; i < activeSizes.length; i++) {
-            for (let j = i; j < activeSizes.length; j++) {
-              for (let k = j; k < activeSizes.length; k++) {
-                candidates.push([activeSizes[i], activeSizes[j], activeSizes[k]])
-              }
-            }
-          }
-          // D. DÖRTLÜ (QUAD)
-          if (activeSizes.length >= 4) {
-            const topSizes = activeSizes.sort((a, b) => currentDemands[b] - currentDemands[a]).slice(0, 4)
-            candidates.push([...topSizes])
-          }
-          if (activeSizes.length >= 4) {
-            candidates.push(activeSizes.slice(0, 4))
-          }
-
-          // 4. SKORLAMA (PHASE- AWARE)
-          let bestCandidate = null
-          let bestScore = -Infinity
-
-          candidates.forEach(candidateSizes => {
-            // Recipe Selection
-            let ratio = {}
-            let type = ''
-            const uniqueSizes = [...new Set(candidateSizes)]
-            const sizeCount = uniqueSizes.length
-
-            if (sizeCount === 1) {
-              ratio = { [candidateSizes[0]]: 4 }
-              type = 'SAME (4x)'
-            } else if (sizeCount === 2) {
-              ratio = { [uniqueSizes[0]]: 2, [uniqueSizes[1]]: 2 }
-              type = 'PAIR (2+2)'
-            } else if (sizeCount === 3) {
-              const maxDemandSize = uniqueSizes.sort((a, b) => currentDemands[b] - currentDemands[a])[0]
-              ratio = {}
-              uniqueSizes.forEach(s => ratio[s] = (s === maxDemandSize ? 2 : 1))
-              type = 'TRIPLE (2+1+1)'
-            } else {
-              ratio = {}
-              candidateSizes.forEach(s => ratio[s] = 1)
-              type = 'QUAD (1x4)'
-            }
-
-            // Calculations
-            let currentLength = 0
-            let piecesPerLayer = 0
-            Object.entries(ratio).forEach(([s, r]) => {
-              currentLength += getConsumption(s) * r
-              piecesPerLayer += r
-            })
-            if (currentLength === 0) return
-
-            const maxLayersFabric = Math.floor(currentGroup.totalMetraj / currentLength)
-
-            let maxLayersDemand = Infinity
-            Object.entries(ratio).forEach(([s, r]) => {
-              const d = currentDemands[s] || 0
-              maxLayersDemand = Math.min(maxLayersDemand, Math.floor(d / r))
-            })
-            if (maxLayersDemand === 0) maxLayersDemand = 1
-
-            // LIMITS
-            const HARD_CAP = 80
-            let targetLayers = Math.min(HARD_CAP, maxLayersFabric, maxLayersDemand)
-
-            // *** CRITICAL PHASE CHECK ***
-            if (targetLayers < phase.minLayers) return // Skip if not deep enough for this phase
-
-            // SCORING (Simple but effective)
-            // Priority 1: Total Layers (Greedy Depth)
-            // Priority 2: Cut Efficiency (Total pieces cleared)
-            const totalPieces = piecesPerLayer * targetLayers
-
-            let finishedSizesCount = 0
-            Object.entries(ratio).forEach(([s, r]) => {
-              const remaining = (currentDemands[s] || 0) - (targetLayers * r)
-              if (remaining <= 0) finishedSizesCount++
-            })
-
-            // New Score Formula:
-            // Base = Layers * 1000
-            // Bonus = Finished Sizes * 5000 (Huge bonus for closing a size)
-            // Penalty = New Cut Creation (Implicitly handled by maximizing layers per cut)
-
-            const score = (targetLayers * 100) + (finishedSizesCount * 5000) + (totalPieces * 10)
-
-            if (score > bestScore) {
-              bestScore = score
-              bestCandidate = {
-                ratio,
-                layers: targetLayers,
-                length: currentLength,
-                type,
-                pieces: totalPieces,
-                score,
-                note: `${phase.name} | L:${targetLayers}`
-              }
-            }
-          })
-
-          if (!bestCandidate) {
-            // No candidate found for this phase.
-            // Break inner loop to proceed to next phase
-            break
-          }
-
-          // EXECUTE CUT
-          const { ratio, layers, length, type, note } = bestCandidate
-
-          const producedQuantities = {}
-          Object.entries(ratio).forEach(([size, r]) => {
-            const qty = layers * r
-            producedQuantities[size] = qty
-            remainingDemands[color][size] = Math.max(0, remainingDemands[color][size] - qty)
-          })
-
-          const usedMetraj = layers * length
-          currentGroup.totalMetraj -= usedMetraj
-
-          plans.push({
-            id: cutNo++,
-            shrinkage: `${currentGroup.mold} | LOT: ${currentGroup.lot}`,
-            lot: currentGroup.lot,
-            mold: currentGroup.mold,
-            totalLayers: layers,
-            markerRatio: ratio,
-            markerLength: length.toFixed(2),
-            rows: [{
-              colors: color,
-              layers: layers,
-              quantities: producedQuantities
-            }],
-            fabrics: currentGroup.fabrics.map(f => f.topNo).join(', '),
-            usedMetraj: usedMetraj.toFixed(2),
-            availableMetraj: (currentGroup.totalMetraj + usedMetraj).toFixed(2),
-            remainingMetraj: currentGroup.totalMetraj.toFixed(2),
-            note: note
-          })
         }
+
+
+        // B. SCORING & FILTERING
+        let bestCandidate = null
+        let bestScore = -Infinity
+
+        let possibleCandidates = []
+
+        candidates.forEach(candidateSizes => {
+          // Recipe logic
+          let ratio = {}
+          let type = ''
+          const uniqueSizes = [...new Set(candidateSizes)]
+          const sizeCount = uniqueSizes.length
+
+          if (sizeCount === 1) {
+            ratio = { [candidateSizes[0]]: 4 }
+            type = 'SAME (4x)'
+          } else if (sizeCount === 2) {
+            ratio = { [uniqueSizes[0]]: 2, [uniqueSizes[1]]: 2 }
+            type = 'PAIR (2+2)'
+          } else if (sizeCount === 3) {
+            const maxDemandSize = uniqueSizes.sort((a, b) => currentDemands[b] - currentDemands[a])[0]
+            ratio = {}
+            uniqueSizes.forEach(s => ratio[s] = (s === maxDemandSize ? 2 : 1))
+            type = 'TRIPLE (2+1+1)'
+          } else {
+            ratio = {}
+            candidateSizes.forEach(s => ratio[s] = 1)
+            type = 'QUAD (1x4)'
+          }
+
+          // Calc
+          let currentLength = 0
+          let piecesPerLayer = 0
+          Object.entries(ratio).forEach(([s, r]) => {
+            currentLength += getConsumption(s) * r
+            piecesPerLayer += r
+          })
+          if (currentLength === 0) return
+
+          const maxLayersFabric = Math.floor(currentGroup.totalMetraj / currentLength)
+          let maxLayersDemand = Infinity
+          Object.entries(ratio).forEach(([s, r]) => {
+            const d = currentDemands[s] || 0
+            maxLayersDemand = Math.min(maxLayersDemand, Math.floor(d / r))
+          })
+          if (maxLayersDemand === 0) maxLayersDemand = 1
+
+          const HARD_CAP = 80
+          let targetLayers = Math.min(HARD_CAP, maxLayersFabric, maxLayersDemand)
+
+          if (targetLayers <= 0) return
+
+          const totalPieces = piecesPerLayer * targetLayers
+
+          // POINT 5: MIN YIELD FILTER (Unless it's the last crumbs)
+          // If total remaining is large, don't accept tiny cuts
+          const MIN_YIELD = avgConsumption > 0 ? 50 : 20 // Arbitrary piece count floor
+          if (totalRemaining > 200 && totalPieces < 40) return
+
+          possibleCandidates.push({
+            ratio, type, targetLayers, totalPieces, currentLength, candidateSizes
+          })
+        })
+
+        if (possibleCandidates.length === 0) break
+
+        // POINT 2: PRIORITY LOCK (80 Layers)
+        const priorityCandidates = possibleCandidates.filter(c => c.targetLayers >= 80)
+
+        // POINT 4: SAME-SIZE LOCK
+        // Check if any single size can do deep cut (e.g. > 65 layers) strictly on its own
+        const deepSingleCandidates = possibleCandidates.filter(c =>
+          c.candidateSizes.length === 1 && c.targetLayers >= 65
+        )
+
+        let finalCandidates = possibleCandidates
+
+        if (priorityCandidates.length > 0) {
+          finalCandidates = priorityCandidates // Ignore everything else if we have 80 layers
+        } else if (deepSingleCandidates.length > 0) {
+          finalCandidates = deepSingleCandidates // Prefer cleaning single sizes deeply
+        }
+
+        // SCORING
+        finalCandidates.forEach(cand => {
+          // POINT 1: CUTS SAVED METRIC (Global Goal)
+          // simulate future cuts
+          // Crude simulation: Total Remaining After This / Ideal Pieces Per Cut (e.g. 200)
+
+          // State BEFORE
+          const currentTotalRemaining = Object.values(currentDemands).reduce((a, b) => a + b, 0)
+          const estimatedCutsBefore = Math.ceil(currentTotalRemaining / 160) // 160 approx ideal pcs per cut (40 layers * 4)
+
+          // State AFTER
+          let remAfter = 0
+          Object.entries(currentDemands).forEach(([s, qty]) => {
+            const consumed = cand.ratio[s] ? cand.targetLayers * cand.ratio[s] : 0
+            remAfter += Math.max(0, qty - consumed)
+          })
+          const estimatedCutsAfter = Math.ceil(remAfter / 160)
+
+          const cutsSaved = estimatedCutsBefore - estimatedCutsAfter
+
+          // SCORE
+          // Global Goal: CutsSaved is KING.
+          // Secondary: Efficiency (Layers).
+
+          const score = (cutsSaved * 3000)
+            + (cand.totalPieces * 1.0)
+            + ((cand.targetLayers / 80) * 500) // Layer efficiency
+
+          // POINT 6: REAL LOOK-AHEAD (Future Fragmentation)
+          // Penalize leaving random small bits
+          let fragmentPenalty = 0
+          Object.entries(cand.ratio).forEach(([s, r]) => {
+            const remaining = (currentDemands[s] || 0) - (cand.targetLayers * r)
+            if (remaining > 0 && remaining < 20) fragmentPenalty += 2000 // Huge penalty for leaving crumbs
+          })
+
+          const finalScore = score - fragmentPenalty
+
+          if (finalScore > bestScore) {
+            bestScore = finalScore
+            bestCandidate = {
+              ...cand,
+              score: finalScore,
+              note: `GS:${cutsSaved} L:${cand.targetLayers}`
+            }
+          }
+        })
+
+        if (!bestCandidate) {
+          currentGroup.totalMetraj = 0
+          continue
+        }
+
+        // EXECUTE
+        const { ratio, targetLayers: layers, currentLength: length, type, note } = bestCandidate
+
+        const producedQuantities = {}
+        Object.entries(ratio).forEach(([size, r]) => {
+          const qty = layers * r
+          producedQuantities[size] = qty
+          remainingDemands[color][size] = Math.max(0, remainingDemands[color][size] - qty)
+        })
+
+        const usedMetraj = layers * length
+        currentGroup.totalMetraj -= usedMetraj
+
+        plans.push({
+          id: cutNo++,
+          shrinkage: `${currentGroup.mold} | LOT: ${currentGroup.lot}`,
+          lot: currentGroup.lot,
+          mold: currentGroup.mold,
+          totalLayers: layers,
+          markerRatio: ratio,
+          markerLength: length.toFixed(2),
+          rows: [{
+            colors: color,
+            layers: layers,
+            quantities: producedQuantities
+          }],
+          fabrics: currentGroup.fabrics.map(f => f.topNo).join(', '),
+          usedMetraj: usedMetraj.toFixed(2),
+          availableMetraj: (currentGroup.totalMetraj + usedMetraj).toFixed(2),
+          remainingMetraj: currentGroup.totalMetraj.toFixed(2),
+          note: note || `Score: ${Math.floor(bestCandidate.score)}`
+        })
       }
     })
 

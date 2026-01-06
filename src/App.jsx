@@ -139,31 +139,51 @@ function App() {
       return
     }
 
-    // ✅ 1. TALEPLERİ HAZIRLA + %5 FAZLA EKLE
-    const colorDemands = {}
+    // ✅ 1. TALEPLERİ HAZIRLA (Renk bazlı birleştir)
+    const aggregatedDemands = {}
 
     orderRows.forEach(row => {
       if (!row.color || row.color.trim() === '') return
 
-      colorDemands[row.color] = {}
-      const sizes = Object.keys(row.quantities).filter(sz => (row.quantities[sz] || 0) > 0)
+      if (!aggregatedDemands[row.color]) {
+        aggregatedDemands[row.color] = {}
+      }
 
-      // Her beden için talep + %5 fazla (eşit dağıtılmış)
-      const totalDemand = Object.values(row.quantities).reduce((a, b) => (a || 0) + (b || 0), 0)
-      const extraTotal = Math.ceil(totalDemand * 0.05) // %5 fazla
+      Object.entries(row.quantities).forEach(([size, qty]) => {
+        const val = parseInt(qty) || 0
+        if (val > 0) {
+          aggregatedDemands[row.color][size] = (aggregatedDemands[row.color][size] || 0) + val
+        }
+      })
+    })
+
+    // ✅ 2. %5 FAZLA EKLE (Toplam talep üzerinden)
+    const colorDemands = {}
+
+    Object.entries(aggregatedDemands).forEach(([color, quantities]) => {
+      colorDemands[color] = {}
+      const totalDemand = Object.values(quantities).reduce((a, b) => a + b, 0)
+
+      // Toplamın %5'i
+      const extraTotal = Math.ceil(totalDemand * 0.05)
+
+      const sizes = Object.keys(quantities)
+      if (sizes.length === 0) return
+
+      // Eşit dağıtım
       const extraPerSize = Math.floor(extraTotal / sizes.length)
       const remainder = extraTotal % sizes.length
 
       sizes.forEach((size, idx) => {
-        const baseDemand = parseInt(row.quantities[size]) || 0
+        const baseDemand = quantities[size] || 0
         const extra = extraPerSize + (idx < remainder ? 1 : 0)
-        colorDemands[row.color][size] = baseDemand + extra
+        colorDemands[color][size] = baseDemand + extra
       })
     })
 
-    console.log('📊 Talepler (%5 fazla dahil):', colorDemands)
+    console.log('📊 Toplam Talepler (+%5 Dahil):', colorDemands)
 
-    // ✅ 2. TÜKETİM DEĞERLERİNİ HAZIRLA
+    // ✅ 3. TÜKETİM DEĞERLERİNİ HAZIRLA
     const getConsumption = (size) => {
       if (consumptionMode === 'SIZE') {
         return parseFloat(sizeConsumptions[size]) || avgConsumption

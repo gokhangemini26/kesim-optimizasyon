@@ -212,231 +212,183 @@ function App() {
         String(a).localeCompare(String(b), undefined, { numeric: true })
       )
 
-      let loopSafety = 0
-      while (loopSafety++ < 500) {
-        // 1. Kumaş Kontrolü
-        const viableGroups = allFabricGroups.filter(g => g.totalMetraj > 0)
-        if (viableGroups.length === 0) break
+      // 3-PHASE EXECUTION STRATEGY
+      const PHASES = [
+        { name: 'PHASE 1 (DEEP)', minLayers: 40 },
+        { name: 'PHASE 2 (BALANCE)', minLayers: 15 },
+        { name: 'PHASE 3 (CLEANUP)', minLayers: 0 }
+      ];
 
-        // En büyük grubu seç
-        viableGroups.sort((a, b) => b.totalMetraj - a.totalMetraj)
-        const currentGroup = viableGroups[0]
+      for (const phase of PHASES) {
+        let phaseLoopSafety = 0
+        while (phaseLoopSafety++ < 200) {
+          // 1. Kumaş Kontrolü
+          const viableGroups = allFabricGroups.filter(g => g.totalMetraj > 0)
+          if (viableGroups.length === 0) break
 
-        // 2. Talep Kontrolü
-        const currentDemands = remainingDemands[color]
-        const totalRemaining = Object.values(currentDemands).reduce((a, b) => a + b, 0)
-        if (totalRemaining <= 0) break
+          // En büyük grubu seç
+          viableGroups.sort((a, b) => b.totalMetraj - a.totalMetraj)
+          const currentGroup = viableGroups[0]
 
-        // 3. ADAY KOMBİNASYONLARIN OLUŞTURULMASI (Candidate Generation)
-        // Sadece talebi olan bedenleri al
-        const activeSizes = colorSizes.filter(s => currentDemands[s] > 0)
-        if (activeSizes.length === 0) break
+          // 2. Talep Kontrolü
+          const currentDemands = remainingDemands[color]
+          const totalRemaining = Object.values(currentDemands).reduce((a, b) => a + b, 0)
+          if (totalRemaining <= 0) break
 
-        const candidates = []
+          // 3. ADAY KOMBİNASYONLARIN OLUŞTURULMASI
+          const activeSizes = colorSizes.filter(s => currentDemands[s] > 0)
+          if (activeSizes.length === 0) break
 
-        // A. TEKLİ (SAME) - [S], [M]
-        activeSizes.forEach(s => candidates.push([s]))
-
-        // B. İKİLİ (PAIR) - [S, M], [S, S]
-        for (let i = 0; i < activeSizes.length; i++) {
-          for (let j = i; j < activeSizes.length; j++) {
-            candidates.push([activeSizes[i], activeSizes[j]])
-          }
-        }
-
-        // C. ÜÇLÜ (TRIPLE) - [S, M, L]
-        // Tüm olası 3'lü kombinasyonları ekle
-        for (let i = 0; i < activeSizes.length; i++) {
-          for (let j = i; j < activeSizes.length; j++) {
-            for (let k = j; k < activeSizes.length; k++) {
-              candidates.push([activeSizes[i], activeSizes[j], activeSizes[k]])
+          const candidates = []
+          // A. TEKLİ (SAME)
+          activeSizes.forEach(s => candidates.push([s]))
+          // B. İKİLİ (PAIR)
+          for (let i = 0; i < activeSizes.length; i++) {
+            for (let j = i; j < activeSizes.length; j++) {
+              candidates.push([activeSizes[i], activeSizes[j]])
             }
           }
-        }
-
-        // D. DÖRTLÜ (QUAD) - [S, M, L, XL]
-        // En çok talep edilen 4 bedenin kombinasyonu
-        if (activeSizes.length >= 4) {
-          const topSizes = activeSizes.sort((a, b) => currentDemands[b] - currentDemands[a]).slice(0, 4)
-          candidates.push([...topSizes])
-        }
-        // Ayrıca manuel olarak ilk 4'lü kombinasyonu da ekleyelim (sıralı gelen)
-        if (activeSizes.length >= 4) {
-          candidates.push(activeSizes.slice(0, 4))
-        }
-
-        // 4. SKORLAMA (SCORING)
-        let bestCandidate = null
-        let bestScore = -Infinity
-
-        candidates.forEach(candidateSizes => {
-          // REÇETE SEÇİMİ (Recipe Selection)
-          let ratio = {}
-          let type = ''
-
-          const uniqueSizes = [...new Set(candidateSizes)]
-          const sizeCount = uniqueSizes.length
-
-          if (sizeCount === 1) {
-            ratio = { [candidateSizes[0]]: 4 }
-            type = 'SAME (4x)'
-          } else if (sizeCount === 2) {
-            ratio = { [uniqueSizes[0]]: 2, [uniqueSizes[1]]: 2 }
-            type = 'PAIR (2+2)'
-          } else if (sizeCount === 3) {
-            const maxDemandSize = uniqueSizes.sort((a, b) => currentDemands[b] - currentDemands[a])[0]
-            ratio = {}
-            uniqueSizes.forEach(s => ratio[s] = (s === maxDemandSize ? 2 : 1))
-            type = 'TRIPLE (2+1+1)'
-          } else {
-            ratio = {}
-            candidateSizes.forEach(s => ratio[s] = 1)
-            type = 'QUAD (1x4)'
+          // C. ÜÇLÜ (TRIPLE)
+          for (let i = 0; i < activeSizes.length; i++) {
+            for (let j = i; j < activeSizes.length; j++) {
+              for (let k = j; k < activeSizes.length; k++) {
+                candidates.push([activeSizes[i], activeSizes[j], activeSizes[k]])
+              }
+            }
+          }
+          // D. DÖRTLÜ (QUAD)
+          if (activeSizes.length >= 4) {
+            const topSizes = activeSizes.sort((a, b) => currentDemands[b] - currentDemands[a]).slice(0, 4)
+            candidates.push([...topSizes])
+          }
+          if (activeSizes.length >= 4) {
+            candidates.push(activeSizes.slice(0, 4))
           }
 
-          // HESAPLAMALAR
-          let currentLength = 0
-          let piecesPerLayer = 0
-          Object.entries(ratio).forEach(([s, r]) => {
-            currentLength += getConsumption(s) * r
-            piecesPerLayer += r
-          })
+          // 4. SKORLAMA (PHASE- AWARE)
+          let bestCandidate = null
+          let bestScore = -Infinity
 
-          if (currentLength === 0) return
+          candidates.forEach(candidateSizes => {
+            // Recipe Selection
+            let ratio = {}
+            let type = ''
+            const uniqueSizes = [...new Set(candidateSizes)]
+            const sizeCount = uniqueSizes.length
 
-          const maxLayersFabric = Math.floor(currentGroup.totalMetraj / currentLength)
+            if (sizeCount === 1) {
+              ratio = { [candidateSizes[0]]: 4 }
+              type = 'SAME (4x)'
+            } else if (sizeCount === 2) {
+              ratio = { [uniqueSizes[0]]: 2, [uniqueSizes[1]]: 2 }
+              type = 'PAIR (2+2)'
+            } else if (sizeCount === 3) {
+              const maxDemandSize = uniqueSizes.sort((a, b) => currentDemands[b] - currentDemands[a])[0]
+              ratio = {}
+              uniqueSizes.forEach(s => ratio[s] = (s === maxDemandSize ? 2 : 1))
+              type = 'TRIPLE (2+1+1)'
+            } else {
+              ratio = {}
+              candidateSizes.forEach(s => ratio[s] = 1)
+              type = 'QUAD (1x4)'
+            }
 
-          let maxLayersDemand = Infinity
-          Object.entries(ratio).forEach(([s, r]) => {
-            const d = currentDemands[s] || 0
-            maxLayersDemand = Math.min(maxLayersDemand, Math.floor(d / r))
-          })
-          if (maxLayersDemand === 0) maxLayersDemand = 1
+            // Calculations
+            let currentLength = 0
+            let piecesPerLayer = 0
+            Object.entries(ratio).forEach(([s, r]) => {
+              currentLength += getConsumption(s) * r
+              piecesPerLayer += r
+            })
+            if (currentLength === 0) return
 
-          // KAT YÖNETİMİ (Soft Cap: 60)
-          // Global Hedef için 60 kat yeterince iyidir. 80'e sadece gerekirse çık.
-          const SOFT_CAP = 65
-          const HARD_CAP = 80
+            const maxLayersFabric = Math.floor(currentGroup.totalMetraj / currentLength)
 
-          let targetLayers = Math.min(HARD_CAP, maxLayersFabric, maxLayersDemand)
+            let maxLayersDemand = Infinity
+            Object.entries(ratio).forEach(([s, r]) => {
+              const d = currentDemands[s] || 0
+              maxLayersDemand = Math.min(maxLayersDemand, Math.floor(d / r))
+            })
+            if (maxLayersDemand === 0) maxLayersDemand = 1
 
-          // Soft Cap Uygulaması (Eğer çok iş bitirmiyorsa ve kumaş yetiyorsa 65'te tutabiliriz ama şimdilik max zorlayalım)
-          // Yeni mantıkta: Max kat her zaman iyidir ama "ne pahasına" olduğuna bakacağız.
+            // LIMITS
+            const HARD_CAP = 80
+            let targetLayers = Math.min(HARD_CAP, maxLayersFabric, maxLayersDemand)
 
-          if (targetLayers <= 0) return
+            // *** CRITICAL PHASE CHECK ***
+            if (targetLayers < phase.minLayers) return // Skip if not deep enough for this phase
 
-          // --- YENİ SKORLAMA: GLOBAL EFFICIENCY (CES) ---
+            // SCORING (Simple but effective)
+            // Priority 1: Total Layers (Greedy Depth)
+            // Priority 2: Cut Efficiency (Total pieces cleared)
+            const totalPieces = piecesPerLayer * targetLayers
 
-          const totalPieces = piecesPerLayer * targetLayers
+            let finishedSizesCount = 0
+            Object.entries(ratio).forEach(([s, r]) => {
+              const remaining = (currentDemands[s] || 0) - (targetLayers * r)
+              if (remaining <= 0) finishedSizesCount++
+            })
 
-          // 1. Cut Efficiency Score (CES) - ANA MOTOR
-          // "Bu kesim kaç işi bitiriyor?"
-          let finishedSizesCount = 0
-          Object.entries(ratio).forEach(([s, r]) => {
-            const remaining = (currentDemands[s] || 0) - (targetLayers * r)
-            if (remaining <= 0) finishedSizesCount++
-            // Veya çok az kaldıysa da bitmiş sayabiliriz (Örn < 3)
-            else if (remaining < 3) finishedSizesCount++
-          })
+            // New Score Formula:
+            // Base = Layers * 1000
+            // Bonus = Finished Sizes * 5000 (Huge bonus for closing a size)
+            // Penalty = New Cut Creation (Implicitly handled by maximizing layers per cut)
 
-          const cutEfficiencyScore = (totalPieces * 2.0)
-            + (finishedSizesCount * 400) // Bir bedeni bitirmek çok değerlidir
-            + (totalPieces >= 200 ? 500 : 0) // Büyük parti bonusu
+            const score = (targetLayers * 100) + (finishedSizesCount * 5000) + (totalPieces * 10)
 
-          // 2. Depth Score (Yumuşatılmış)
-          // 60 kattan sonrası için ekstra puan yok. 60 kat = 80 kat kadar iyidir.
-          const depthScore = Math.min(targetLayers, 60) * 10
-
-          // 3. Balance Score (Minimal)
-          const balanceScore = sizeCount * 50
-
-          // 4. PENALTILAR
-          let penalty = 0
-
-          // A. Bottleneck Penalty (Tersine Çevrilmiş)
-          // Az kat (<30) VE Az İş (<100) ise ceza ver.
-          // Yani: "Hem sığ kesiyorsun hem de az iş yapıyorsun, yapma."
-          if (targetLayers < 30 && totalPieces < 100 && maxLayersFabric > 40) {
-            penalty += 1500
-          }
-
-          // B. Future Fragment Risk (Beden Bazlı Look-Ahead)
-          // Bu kesimi yaparsam, geriye "tek başına kalmış" ve "az kalmış" bir beden bırakıyor muyum?
-          // Bu durum gelecekte ekstra bir kesim demektir.
-          let futureZombieCount = 0
-          const futureRemains = {}
-          let remainingTypes = 0
-
-          // Geleceği simüle et
-          Object.keys(currentDemands).forEach(s => {
-            const r = ratio[s] || 0
-            const left = (currentDemands[s] || 0) - (targetLayers * r)
-            if (left > 0) {
-              remainingTypes++
-              futureRemains[s] = left
-              if (left < 40) futureZombieCount++ // 40 adetten az kalan "zombi" beden
+            if (score > bestScore) {
+              bestScore = score
+              bestCandidate = {
+                ratio,
+                layers: targetLayers,
+                length: currentLength,
+                type,
+                pieces: totalPieces,
+                score,
+                note: `${phase.name} | L:${targetLayers}`
+              }
             }
           })
 
-          // Eğer geriye sadece 1 çeşit beden kalıyorsa ve o da azsa (zombi), bu çok kötü.
-          if (remainingTypes === 1 && futureZombieCount === 1) {
-            penalty += 2000 // Geleceği kirletme cezası
+          if (!bestCandidate) {
+            // No candidate found for this phase.
+            // Break inner loop to proceed to next phase
+            break
           }
 
-          const finalScore = cutEfficiencyScore + depthScore + balanceScore - penalty
+          // EXECUTE CUT
+          const { ratio, layers, length, type, note } = bestCandidate
 
-          if (finalScore > bestScore) {
-            bestScore = finalScore
-            bestCandidate = {
-              ratio,
-              layers: targetLayers,
-              length: currentLength,
-              type,
-              pieces: totalPieces,
-              score: finalScore,
-              note: `CES:${Math.floor(cutEfficiencyScore)} D:${depthScore}`
-            }
-          }
-        })
+          const producedQuantities = {}
+          Object.entries(ratio).forEach(([size, r]) => {
+            const qty = layers * r
+            producedQuantities[size] = qty
+            remainingDemands[color][size] = Math.max(0, remainingDemands[color][size] - qty)
+          })
 
-        if (!bestCandidate) {
-          // Uygun aday yoksa bu grubu geç
-          currentGroup.totalMetraj = 0
-          continue
+          const usedMetraj = layers * length
+          currentGroup.totalMetraj -= usedMetraj
+
+          plans.push({
+            id: cutNo++,
+            shrinkage: `${currentGroup.mold} | LOT: ${currentGroup.lot}`,
+            lot: currentGroup.lot,
+            mold: currentGroup.mold,
+            totalLayers: layers,
+            markerRatio: ratio,
+            markerLength: length.toFixed(2),
+            rows: [{
+              colors: color,
+              layers: layers,
+              quantities: producedQuantities
+            }],
+            fabrics: currentGroup.fabrics.map(f => f.topNo).join(', '),
+            usedMetraj: usedMetraj.toFixed(2),
+            availableMetraj: (currentGroup.totalMetraj + usedMetraj).toFixed(2),
+            remainingMetraj: currentGroup.totalMetraj.toFixed(2),
+            note: note
+          })
         }
-
-        // EN İYİ PLANI UYGULA
-        const { ratio, layers, length, type } = bestCandidate
-
-        const producedQuantities = {}
-        Object.entries(ratio).forEach(([size, r]) => {
-          const qty = layers * r
-          producedQuantities[size] = qty
-          remainingDemands[color][size] = Math.max(0, remainingDemands[color][size] - qty)
-        })
-
-        const usedMetraj = layers * length
-        currentGroup.totalMetraj -= usedMetraj
-
-        plans.push({
-          id: cutNo++,
-          shrinkage: `${currentGroup.mold} | LOT: ${currentGroup.lot}`,
-          lot: currentGroup.lot,
-          mold: currentGroup.mold,
-          totalLayers: layers,
-          markerRatio: ratio,
-          markerLength: length.toFixed(2),
-          rows: [{
-            colors: color,
-            layers: layers,
-            quantities: producedQuantities
-          }],
-          fabrics: currentGroup.fabrics.map(f => f.topNo).join(', '),
-          usedMetraj: usedMetraj.toFixed(2),
-          availableMetraj: (currentGroup.totalMetraj + usedMetraj).toFixed(2),
-          remainingMetraj: currentGroup.totalMetraj.toFixed(2),
-          note: `${type} - Skor: ${Math.floor(bestCandidate.score)}`
-        })
       }
     })
 

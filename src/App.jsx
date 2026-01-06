@@ -202,203 +202,153 @@ function App() {
     let cutNo = 1
     const remainingDemands = JSON.parse(JSON.stringify(colorDemands))
 
-    // ✅ 4. RENK BAZLI OPTİMİZASYON (Önce tek renk-tek lot)
-    const colors = Object.keys(colorDemands)
+    // ✅ 4. RENK BAZLI OPTİMİZASYON (Greedy - En Verimli Kesim)
+    const sortedColors = Object.keys(colorDemands)
 
-    colors.forEach(color => {
+    sortedColors.forEach(color => {
+      // Renk bedenlerini sırala
       const colorSizes = Object.keys(colorDemands[color]).sort((a, b) =>
         String(a).localeCompare(String(b), undefined, { numeric: true })
       )
 
-      // Bu renk için toplam talep
-      let colorTotalRemaining = Object.values(remainingDemands[color]).reduce((a, b) => a + b, 0)
+      // Bir rengi tamamen bitirene kadar döngü
+      let loopSafety = 0
+      while (loopSafety++ < 500) {
+        // Hala talep var mı?
+        const remainingQty = Object.values(remainingDemands[color]).reduce((a, b) => a + b, 0)
+        if (remainingQty <= 0) break
 
-      // ✅ 5. HER KUMAŞ GRUBUNU DENE (En büyük metrajdan başla)
-      allFabricGroups.forEach(fabricGroup => {
-        if (colorTotalRemaining <= 0) return // Bu renk tamamlandı
+        // ✅ 5. EN BÜYÜK KUMAŞ GRUBUNU BUL (Optimizasyon: Büyük toplarla büyük işleri bitir)
+        // Sadece içinde kumaş kalan lotları filtrele
+        const viableGroups = allFabricGroups.filter(g => g.totalMetraj > 0)
 
-        const { lot, fabrics, totalMetraj, mold } = fabricGroup
+        if (viableGroups.length === 0) {
+          console.warn(`${color} için kumaş kalmadı!`)
+          break // Kumaş bitti
+        }
 
-        // ✅ 6. MARKER RATIO OLUŞTUR (Talebe göre oransal)
-        const markerRatio = {}
-        let totalRatioUnits = 0
+        // En büyük metrajlı grubu seç (Zaten sıralı geliyordu ama garanti olsun)
+        viableGroups.sort((a, b) => b.totalMetraj - a.totalMetraj)
+        const currentGroup = viableGroups[0]
 
-        colorSizes.forEach(size => {
-          const demand = remainingDemands[color][size] || 0
-          if (demand > 0) {
-            markerRatio[size] = 1 // Basit: Her bedenden 1'er
-            totalRatioUnits += 1
+        // ✅ 6. EN ÇOK İSTENEN BEDENLERİ SEÇ (Max 4 çeşit)
+        // Talebi en yüksek olan bedenleri bul
+        const sizesWithDemand = colorSizes
+          .filter(s => remainingDemands[color][s] > 0)
+          .sort((a, b) => remainingDemands[color][b] - remainingDemands[color][a]) // Çoktan aza
+          .slice(0, 4) // En çok istenen ilk 4 beden
+
+        if (sizesWithDemand.length === 0) break // Talep bitti
+
+        // ✅ 7. ORAN (RATIO) BELİRLE VE OPTİMUM PLANI BUL
+        // Strateji: Öyle bir ratio ve kat sayısı bul ki, tek seferde EN ÇOK adedi keselim.
+        // Denenecek basit ratiolar (Makine öğrenmesi yerine sezgisel tarama)
+        let bestPlan = null
+        let maxPieces = 0
+
+        // Temel ratio kombinasyonları (En çok istenen bedene ağırlık ver)
+        const targetSize = sizesWithDemand[0]
+        const candidates = []
+
+        // 1. Düz mantık: Her bedenden 1 tane
+        candidates.push(sizesWithDemand.reduce((acc, s) => ({ ...acc, [s]: 1 }), {}))
+
+        // 2. Ağırlıklı mantık: En çok istenenden 2, diğerlerinden 1
+        if (remainingDemands[color][targetSize] > 50) {
+          candidates.push(sizesWithDemand.reduce((acc, s) => ({ ...acc, [s]: s === targetSize ? 2 : 1 }), {}))
+        }
+
+        // 3. Çok ağırlıklı: En çok istenenden 3 veya 4 (Eğer diğerlerinden çok fazlaysa)
+        if (remainingDemands[color][targetSize] > 100) {
+          candidates.push(sizesWithDemand.reduce((acc, s) => ({ ...acc, [s]: s === targetSize ? 3 : 1 }), {}))
+        }
+
+        candidates.forEach(ratio => {
+          let currentLength = 0
+          Object.entries(ratio).forEach(([s, r]) => currentLength += getConsumption(s) * r)
+
+          // Kısıtlar
+          const maxLayersFabric = Math.floor(currentGroup.totalMetraj / currentLength)
+
+          let maxLayersDemand = Infinity
+          Object.entries(ratio).forEach(([s, r]) => {
+            const d = remainingDemands[color][s] || 0
+            maxLayersDemand = Math.min(maxLayersDemand, Math.floor(d / r)) // Tam kat kesebiliyor muyuz?
+          })
+
+          // Eğer talep çok az kalmışsa (floor 0 veriyorsa) bir üst kata tamamla (artık kumaş kısıtı izin verirse)
+          if (maxLayersDemand === 0) maxLayersDemand = 1
+
+          // Nihai Kat Sayısı (80 ile sınırla)
+          // Öncelik: Kumaş yettiği sürece max 80 kat at. Talep fazlası olması önemli değil (%5 kuralı zaten var, fazlası stoğa)
+          // Fakta kullanıcının talebi "En fazla kesim adedine ulaş".
+          // Bu yüzden talebi tam karşılayacak kadar değil, 80 kata kadar ne varsa kesebiliriz.
+          // AMA DİKKAT: Talepten çok fazla kesmek istemeyiz. Sadece biraz fazla olabilir.
+          // Strateji: Talebi karşılayan kat sayısı (maxLayersDemand) ile 80 arasında denge kur.
+
+          const possibleLayers = Math.min(80, maxLayersFabric, Math.max(1, Math.ceil(maxLayersDemand)))
+
+          if (possibleLayers > 0) {
+            const totalPieces = Object.values(ratio).reduce((a, b) => a + b, 0) * possibleLayers
+            if (totalPieces > maxPieces) {
+              maxPieces = totalPieces
+              bestPlan = {
+                ratio,
+                layers: possibleLayers,
+                length: currentLength
+              }
+            }
           }
         })
 
-        if (totalRatioUnits === 0) return
+        if (!bestPlan) {
+          // Hiçbir plan uymadı (Kumaş yetmiyor veya başka sorun), bu grubu pas geçip döngüye devam etmesi için yapay olarak metrajı 0 varsayalım (bu döngülük)
+          currentGroup.totalMetraj = 0
+          continue
+        }
 
-        // ✅ 7. MARKER UZUNLUĞU HESAPLA
-        let markerLength = 0
-        Object.entries(markerRatio).forEach(([size, count]) => {
-          markerLength += getConsumption(size) * count
-        })
+        // ✅ 8. PLANI UYGULA VE KAYDET
+        const { ratio, layers, length } = bestPlan
 
-        if (markerLength === 0) return
-
-        // ✅ 8. MAKSİMUM KAT SAYISI
-        const maxLayersByFabric = Math.floor(totalMetraj / markerLength)
-
-        // Her beden için minimum kat sayısı
-        let maxLayersByDemand = Infinity
-        Object.entries(markerRatio).forEach(([size, ratio]) => {
-          const demand = remainingDemands[color][size] || 0
-          const layersNeeded = Math.ceil(demand / ratio)
-          maxLayersByDemand = Math.min(maxLayersByDemand, layersNeeded)
-        })
-
-        const totalLayers = Math.min(80, maxLayersByFabric, maxLayersByDemand)
-
-        if (totalLayers <= 0) return
-
-        // ✅ 9. ÜRETİLEN ADETLERİ HESAPLA VE TALEBİ GÜNCELLE
+        // Üretilen adetleri hesapla
         const producedQuantities = {}
-
-        Object.entries(markerRatio).forEach(([size, ratio]) => {
-          const produced = totalLayers * ratio
-          producedQuantities[size] = produced
-
+        Object.entries(ratio).forEach(([size, r]) => {
+          const qty = layers * r
+          producedQuantities[size] = qty
           // Talebi düş
-          remainingDemands[color][size] = Math.max(0, remainingDemands[color][size] - produced)
+          remainingDemands[color][size] = Math.max(0, remainingDemands[color][size] - qty)
         })
 
-        // ✅ 10. PLANI KAYDET
+        // Kumaşı düş
+        const usedMetraj = layers * length
+        currentGroup.totalMetraj -= usedMetraj
+
+        // Kaydet
         plans.push({
           id: cutNo++,
-          shrinkage: `${mold} | LOT: ${lot}`,
-          lot: lot,
-          mold: mold,
-          totalLayers: totalLayers,
-          markerRatio: markerRatio,
-          markerLength: markerLength.toFixed(2),
+          shrinkage: `${currentGroup.mold} | LOT: ${currentGroup.lot}`,
+          lot: currentGroup.lot,
+          mold: currentGroup.mold,
+          totalLayers: layers,
+          markerRatio: ratio,
+          markerLength: length.toFixed(2),
           rows: [{
             colors: color,
-            layers: totalLayers,
+            layers: layers,
             quantities: producedQuantities
           }],
-          fabrics: fabrics.map(f => f.topNo).join(', '),
-          usedMetraj: (totalLayers * markerLength).toFixed(2),
-          availableMetraj: totalMetraj.toFixed(2),
-          remainingMetraj: (totalMetraj - totalLayers * markerLength).toFixed(2)
+          fabrics: currentGroup.fabrics.map(f => f.topNo).join(', '),
+          usedMetraj: usedMetraj.toFixed(2),
+          availableMetraj: (currentGroup.totalMetraj + usedMetraj).toFixed(2), // Eski hali
+          remainingMetraj: currentGroup.totalMetraj.toFixed(2)
         })
-
-        // Kalan talebi güncelle
-        colorTotalRemaining = Object.values(remainingDemands[color]).reduce((a, b) => a + b, 0)
-      })
+      }
     })
 
-    // ✅ 11. EKSİK KALAN TALEPLERİ TOPLA (Çok renkli kesim planları)
-    const hasRemainingDemands = Object.values(remainingDemands).some(colorDemand =>
-      Object.values(colorDemand).some(qty => qty > 0)
-    )
+    // Eksik kalan, çok renkli vs. durumlar için şu anlık basit fallback gerekmiyor çünkü 
+    // yukarıdaki döngü kumaş ve talep bitene kadar zorluyor.
 
-    if (hasRemainingDemands) {
-      console.log('⚠️ Eksik talepler var, çok renkli kesim planı oluşturuluyor...')
-
-      // Kalan kumaşları kullan
-      allFabricGroups.forEach(fabricGroup => {
-        const { lot, fabrics, totalMetraj, mold } = fabricGroup
-
-        // Hangi renklerde talep var?
-        const colorsWithDemand = Object.keys(remainingDemands).filter(color =>
-          Object.values(remainingDemands[color]).some(qty => qty > 0)
-        )
-
-        if (colorsWithDemand.length === 0) return
-
-        // Tüm bedenleri topla
-        const allSizes = new Set()
-        colorsWithDemand.forEach(color => {
-          Object.keys(remainingDemands[color]).forEach(sz => {
-            if (remainingDemands[color][sz] > 0) {
-              allSizes.add(sz)
-            }
-          })
-        })
-
-        const sizesArray = Array.from(allSizes).sort((a, b) =>
-          String(a).localeCompare(String(b), undefined, { numeric: true })
-        )
-
-        if (sizesArray.length === 0) return
-
-        // Marker ratio
-        const markerRatio = {}
-        sizesArray.forEach(size => {
-          markerRatio[size] = 1
-        })
-
-        // Marker length
-        let markerLength = 0
-        sizesArray.forEach(size => {
-          markerLength += getConsumption(size)
-        })
-
-        const maxLayersByFabric = Math.floor(totalMetraj / markerLength)
-
-        // Her renk için ayrı satır
-        const planRows = []
-        let totalLayersUsed = 0
-
-        colorsWithDemand.forEach(color => {
-          let minLayers = Infinity
-
-          sizesArray.forEach(size => {
-            const demand = remainingDemands[color][size] || 0
-            if (demand > 0) {
-              minLayers = Math.min(minLayers, Math.ceil(demand / (markerRatio[size] || 1)))
-            }
-          })
-
-          if (minLayers === Infinity || minLayers <= 0) return
-
-          const colorLayers = Math.min(minLayers, maxLayersByFabric - totalLayersUsed)
-
-          if (colorLayers > 0) {
-            const producedQuantities = {}
-
-            sizesArray.forEach(size => {
-              const produced = colorLayers * (markerRatio[size] || 0)
-              producedQuantities[size] = produced
-
-              if (remainingDemands[color][size]) {
-                remainingDemands[color][size] = Math.max(0, remainingDemands[color][size] - produced)
-              }
-            })
-
-            planRows.push({
-              colors: color,
-              layers: colorLayers,
-              quantities: producedQuantities
-            })
-
-            totalLayersUsed += colorLayers
-          }
-        })
-
-        if (planRows.length > 0) {
-          plans.push({
-            id: cutNo++,
-            shrinkage: `${mold} | LOT: ${lot}`,
-            lot: lot,
-            mold: mold,
-            totalLayers: totalLayersUsed,
-            markerRatio: markerRatio,
-            markerLength: markerLength.toFixed(2),
-            rows: planRows,
-            fabrics: fabrics.map(f => f.topNo).join(', '),
-            usedMetraj: (totalLayersUsed * markerLength).toFixed(2),
-            availableMetraj: totalMetraj.toFixed(2),
-            remainingMetraj: (totalMetraj - totalLayersUsed * markerLength).toFixed(2)
-          })
-        }
-      })
-    }
+    console.log('✅ Oluşturulan Planlar:', plans)
 
     // ✅ 12. ÖZET RAPOR OLUŞTUR
     const allSizesSet = new Set()

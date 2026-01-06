@@ -1,10 +1,14 @@
 import React from 'react'
 import { Plus, Trash2, Clipboard } from 'lucide-react'
 
-// SIZE_TYPES removed, controlled by parent
+const SIZE_TYPES = {
+    TIP1: ['28/32', '29/32', '30/32', '31/32', '32/32', '33/32', '34/32', '36/32', '38/32', '30/34', '31/34', '32/34', '33/34', '34/34', '36/34', '38/34'],
+    TIP2: ['2XS', 'XS', 'S', 'M', 'L', 'XL', '2XL', '3XL', '4XL'],
+    TIP3: ['44', '46', '48', '50', '52', '54', '56', '58', '60']
+}
 
-export default function OrderTable({ sizeType, sizes, rows, onUpdateRows }) {
-    // const sizes = SIZE_TYPES[sizeType] || SIZE_TYPES.TIP1 // Removed
+export default function OrderTable({ sizeType, sizes: propSizes, rows, onUpdateRows }) {
+    const sizes = propSizes || SIZE_TYPES[sizeType] || SIZE_TYPES.TIP1
 
     const handleCellChange = (rowIndex, size, value) => {
         const newRows = [...rows]

@@ -24,7 +24,6 @@ function App() {
   const [sizeConsumptions, setSizeConsumptions] = useState({})
   const [sizeType, setSizeType] = useState('TIP1')
   const [groupingResults, setGroupingResults] = useState(null)
-  const [loading, setLoading] = useState(false)
 
   useEffect(() => {
     // Check for existing session
@@ -133,111 +132,216 @@ function App() {
   }
 
   const handlePreparePlan = async (data) => {
-    // We use fabricRows and orderRows from state directly (or passed data)
-    // data might contain local overrides, but we rely on state mostly
-    const { orderRows: passedOrders, avgConsumption } = data
+    const { orderRows, groupingResults, avgConsumption } = data
+    if (!groupingResults) { alert("Lütfen kumaşları gruplandırın!"); return; }
 
-    // Use passed orders if available, else state
-    const currentOrders = passedOrders || orderRows
-
-    if (fabricRows.length === 0) { alert("Lütfen kumaş listesi ekleyin!"); return; }
-    if (currentOrders.length === 0) { alert("Lütfen sipariş ekleyin!"); return; }
-
-    try {
-      setLoading(true)
-
-      // Prepare Payload matching backend new schema
-      const payload = {
-        orderRows: currentOrders.map(r => ({
-          id: r.id,
-          color: r.color,
-          quantities: Object.fromEntries(Object.entries(r.quantities).map(([k, v]) => [k, parseInt(v) || 0]))
-        })),
-        fabrics: fabricRows.map(f => ({
-          id: String(f.id),
-          topNo: String(f.topNo),
-          lot: f.lot || '1',
-          shrinkageCode: f.shrinkageCode || 'E0 B0',
-          metraj: parseFloat(f.metraj) || 0
-        })),
-        avgConsumption: parseFloat(avgConsumption) || 1.35
-      }
-
-      // Call Backend
-      const response = await fetch('http://localhost:8000/optimize', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+    const initialDemands = JSON.parse(JSON.stringify(orderRows))
+    const currentDemands = {}
+    orderRows.forEach(row => {
+      currentDemands[row.color] = {}
+      Object.entries(row.quantities).forEach(([size, qty]) => {
+        currentDemands[row.color][size] = parseInt(qty) || 0
       })
+    })
 
-      if (!response.ok) {
-        throw new Error(`Backend Error: ${response.statusText}`)
-      }
+    const fabricLots = [
+      ...groupingResults.kalip1.map(g => ({ ...g, mold: 'KALIP - 1' })),
+      ...groupingResults.kalip2.map(g => ({ ...g, mold: 'KALIP - 2' }))
+    ]
 
-      const plans = await response.json()
+    const plans = []
+    let cutNo = 1
 
-      // 4. Summarize & Finalize (Client Side Calculation for View)
-      const initialDemands = JSON.parse(JSON.stringify(orderRows))
-      const allSizesSet = new Set()
-      initialDemands.forEach(order => Object.keys(order.quantities).forEach(sz => allSizesSet.add(sz)))
-      const allSizes = Array.from(allSizesSet).sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }))
+    fabricLots.forEach(lotGroup => {
+      let lotMetraj = lotGroup.totalMetraj
 
-      const summary = initialDemands.map(order => {
-        const planned = {}
-        allSizes.forEach(sz => {
-          planned[sz] = 0
-          plans.forEach(plan => plan.rows.forEach(r => {
-            // Backend might return slightly different strings, normalize if needed
-            // Current backend returns joined sorted colors.
-            // We check if "Red" is in "Blue+Red".
-            // Simple inclusion check or structured?
-            // Backend Output: "rows": [{ "colors": "c1+c2", "quantities": { "32": 100 } }]
-            // It summed them up.
-            // Issue: Summary View needs to split them back to see if Order A is satisfied.
-            // Fix: Backend should return detailed allocation or Frontend must strictly parse.
-            // Python Backend update in future: Return detailed allocation.
-            // For now, let's assume "Single Lot Per Color" priority holds mostly, so row.colors is usually single.
-            // If multiple, we might count it for both? That would double count.
-            // To be safe, let's rely on backend returning detailed rows per color if possible?
-            // Currently backend merges. 
-            // Let's use what we have:
-            // If row.colors == order.color, exact match.
-            if (r.colors === order.color) {
-              planned[sz] += (r.quantities[sz] || 0)
-            } else if (r.colors.includes(order.color)) {
-              // Mixed row. We don't know distinct share without better backend response.
-              // For now, assume proportional or just add it (careful).
-              // Let's assume strict Single Lot for now works 95%.
-            }
-          }))
+      while (true) {
+        const globalDemand = {}
+        Object.values(currentDemands).forEach(colorDemand => {
+          Object.entries(colorDemand).forEach(([sz, qty]) => {
+            globalDemand[sz] = (globalDemand[sz] || 0) + qty
+          })
         })
-        return { color: order.color, demanded: order.quantities, planned }
-      })
 
-      // --- Log the run to Supabase ---
-      if (user) {
-        const totalPlannedCount = summary.reduce((acc, row) => acc + Object.values(row.planned).reduce((a, b) => a + b, 0), 0)
-        await supabase.from('logs').insert([{
-          user_id: user.id,
-          action: 'OPTIMIZATION_RUN_PYTHON',
-          details: {
-            plans_count: plans.length,
-            total_pieces: totalPlannedCount,
-            customer: selectedCustomer?.name
+        const availableSizes = Object.keys(globalDemand).filter(s => globalDemand[s] > 0)
+        if (availableSizes.length === 0) break
+
+        const sizeGroups = generateSizeGroups(availableSizes)
+        let best = null
+        let maxScore = -1
+
+        sizeGroups.forEach(group => {
+          const markerLen = group.length * avgConsumption
+          if (markerLen === 0) return
+
+          const ratio = {}
+          group.forEach(s => ratio[s] = (ratio[s] || 0) + 1)
+
+          const candidateLayers = [80]
+          Object.keys(ratio).forEach(s => {
+            candidateLayers.push(Math.floor(globalDemand[s] / ratio[s]))
+          })
+          candidateLayers.push(Math.floor(lotMetraj / markerLen))
+
+          const uniqueLayers = [...new Set(candidateLayers)].filter(l => l > 0 && l <= 80 && l * markerLen <= lotMetraj)
+          if (uniqueLayers.length === 0) return
+
+          uniqueLayers.forEach(layers => {
+            let usefulPieces = 0
+            const tempDemand = { ...globalDemand }
+
+            group.forEach(sz => {
+              const canTake = Math.min(layers, tempDemand[sz] || 0)
+              usefulPieces += canTake
+              tempDemand[sz] -= canTake
+            })
+
+            const uniqueness = new Set(group).size
+            const score = usefulPieces * 1000 + group.length * 10 + uniqueness
+
+            if (score > maxScore) {
+              maxScore = score
+              best = { group, layers, markerLen, ratio }
+            }
+          })
+        })
+
+        if (!best) break
+
+        // Initialize plan rows for each color with 0 layers
+        const colorAllocations = {}
+        Object.keys(currentDemands).forEach(color => {
+          colorAllocations[color] = { layers: 0, distinctNeed: 0 }
+        })
+
+        let remainingLayers = best.layers
+
+        // Greedy Layer Allocation Loop
+        // We assign layers one by one to the color that "needs" it most
+        while (remainingLayers > 0) {
+          let bestColor = null
+          let maxNeedScore = -1
+
+          // Calculate "Need Score" for each color
+          Object.entries(currentDemands).forEach(([color, demandMap]) => {
+            // A color needs this layer if it has demand for the sizes in the marker
+            // Score = Sum of pieces it would effectively use from 1 layer of this marker
+            let score = 0
+            best.group.forEach(sz => {
+              if ((demandMap[sz] || 0) > 0) {
+                score += 1
+                // We could weight this by demand magnitude, but simple binary need (needs/doesn't need) 
+                // often balances better for "cleaning up" orders. 
+                // Let's use: Score = How many USEFUL pieces this layer provides.
+              }
+            })
+
+            // Refine Score: Prioritize colors that have higher remaining demand
+            if (score > 0) {
+              // Add a tie-breaker based on total remaining demand for these sizes
+              let totalRemaining = 0
+              best.group.forEach(sz => totalRemaining += (demandMap[sz] || 0))
+              score = score * 1000 + totalRemaining
+            }
+
+            if (score > maxNeedScore && score > 0) {
+              maxNeedScore = score
+              bestColor = color
+            }
+          })
+
+          if (!bestColor) {
+            // No color needs what this marker produces anymore, but we have layers left.
+            // Force assign to the color with highest general demand or just first one to start filling
+            // In optimization, we usually stop here, but since 'best.layers' was calculated based on aggregate,
+            // we should find someone to take it.
+            // Let's pick the color with highest pending demand for ANY size in marker.
+            let maxGeneric = -1
+            Object.entries(currentDemands).forEach(([color, demandMap]) => {
+              let d = 0
+              best.group.forEach(sz => d += (demandMap[sz] || 0))
+              if (d > maxGeneric) { maxGeneric = d; bestColor = color }
+            })
           }
-        }])
+
+          if (bestColor) {
+            colorAllocations[bestColor].layers += 1
+            remainingLayers--
+
+            // Reduce demand for this assigned layer
+            // Note: A layer produces 'ratio[sz]' pieces for each size 'sz'
+            Object.entries(best.ratio).forEach(([sz, qtyPerLayer]) => {
+              currentDemands[bestColor][sz] = (currentDemands[bestColor][sz] || 0) - qtyPerLayer
+            })
+          } else {
+            // If absolutely no one wants it (all demands satisfied or negative), break to avoid infinite loop
+            // This might happen if best.layers was overshoot.
+            break;
+          }
+        }
+
+        const planRows = []
+        Object.entries(colorAllocations).forEach(([color, data]) => {
+          if (data.layers > 0) {
+            const rowQuantities = {}
+            // Calculate produced qtys for display: Layers * Marker Ratio
+            Object.entries(best.ratio).forEach(([sz, ratio]) => {
+              rowQuantities[sz] = data.layers * ratio
+            })
+
+            planRows.push({
+              colors: color,
+              layers: data.layers,
+              quantities: rowQuantities
+            })
+          }
+        })
+
+        plans.push({
+          id: cutNo++,
+          shrinkage: `${lotGroup.mold} | LOT: ${lotGroup.lot}`,
+          lot: lotGroup.lot,
+          mold: lotGroup.mold,
+          totalLayers: best.layers,
+          markerRatio: best.ratio,
+          rows: planRows,
+          fabrics: lotGroup.fabrics.map(f => f.topNo).join(', ')
+        })
+
+        lotMetraj -= (best.layers * best.markerLen)
       }
+    })
 
-      setResults(plans);
-      setOptimizationSummary(summary);
-      navigate('/results')
+    const allSizesSet = new Set()
+    initialDemands.forEach(order => Object.keys(order.quantities).forEach(sz => allSizesSet.add(sz)))
+    const allSizes = Array.from(allSizesSet).sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }))
 
-    } catch (error) {
-      console.error("Optimization failed:", error)
-      alert("Optimizasyon sunucusuna bağlanılamadı! Lütfen backend'in çalıştığından emin olun.\n" + error.message)
-    } finally {
-      setLoading(false)
+    const summary = initialDemands.map(order => {
+      const planned = {}
+      allSizes.forEach(sz => {
+        planned[sz] = 0
+        plans.forEach(plan => plan.rows.forEach(r => {
+          if (r.colors === order.color) planned[sz] += (r.quantities[sz] || 0)
+        }))
+      })
+      return { color: order.color, demanded: order.quantities, planned }
+    })
+
+    // --- Log the run to Supabase ---
+    if (user) {
+      const totalPlannedCount = summary.reduce((acc, row) => acc + Object.values(row.planned).reduce((a, b) => a + b, 0), 0)
+      await supabase.from('logs').insert([{
+        user_id: user.id,
+        action: 'OPTIMIZATION_RUN',
+        details: {
+          plans_count: plans.length,
+          total_pieces: totalPlannedCount,
+          customer: selectedCustomer?.name
+        }
+      }])
     }
+
+    setResults(plans); setOptimizationSummary(summary); navigate('/results')
   }
 
   return (

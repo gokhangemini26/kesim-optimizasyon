@@ -207,15 +207,12 @@ export default function ResultsView({ plans, summary, onBack }) {
                                             <Ruler size={14} className="text-primary-500" />
                                             PASTAL DİZİMİ:
                                             <span className="text-slate-900 font-black">
-                                                {Object.keys(group.markerRatio || {}).length > 0
-                                                    ? Object.entries(group.markerRatio).map(([sz, count]) => `${sz}:${count}`).join(', ')
-                                                    : 'OTOMATİK DAĞITIM'
-                                                }
+                                                {Object.entries(group.markerRatio).map(([sz, count]) => `${sz}:${count}`).join(', ')}
                                             </span>
                                         </span>
                                         <span className="bg-white shadow-sm border border-slate-100 px-3 py-1.5 rounded-xl flex items-center gap-1.5">
                                             <Layers size={14} className="text-blue-500" />
-                                            TOPLAM ADET: <span className="text-slate-900 font-black">{group.totalLayers}</span>
+                                            TOPLAM KAT: <span className="text-slate-900 font-black">{group.totalLayers}</span>
                                         </span>
                                     </div>
                                 </div>
@@ -232,16 +229,14 @@ export default function ResultsView({ plans, summary, onBack }) {
                                 <table className="w-full text-center border-collapse">
                                     <thead>
                                         <tr className="bg-slate-50/50 border-b-2 border-slate-100">
-                                            <th className="p-6 font-black text-slate-400 uppercase tracking-widest text-xs text-left border-r border-slate-50">RENK</th>
+                                            <th className="p-6 font-black text-slate-400 uppercase tracking-widest text-xs text-left border-r border-slate-50">RENK / KAT</th>
                                             {planSizes.map(size => (
                                                 <th key={size} className="p-6 border-r border-slate-50">
                                                     <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 italic">BEDEN</div>
                                                     <div className="text-xl font-black text-slate-900">{size}</div>
-                                                    {group.markerRatio && group.markerRatio[size] ? (
-                                                        <div className="text-[10px] font-bold text-primary-500">
-                                                            (x{group.markerRatio[size]})
-                                                        </div>
-                                                    ) : null}
+                                                    <div className="text-[10px] font-bold text-primary-500">
+                                                        (x{group.markerRatio[size]})
+                                                    </div>
                                                 </th>
                                             ))}
                                             <th className="p-6">
@@ -270,7 +265,7 @@ export default function ResultsView({ plans, summary, onBack }) {
                                                         </td>
                                                     ))}
                                                     <td className="p-6 text-2xl font-black text-primary-600 bg-primary-50/20">
-                                                        {rowTotal || 0}
+                                                        {rowTotal}
                                                     </td>
                                                 </tr>
                                             )

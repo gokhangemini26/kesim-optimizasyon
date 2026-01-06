@@ -91,7 +91,7 @@ export default function DataEntryContainer({
                     onChange={(e) => setSizeType(e.target.value)}
                     className="bg-white border border-slate-200 rounded-xl px-4 py-2 font-bold text-slate-700 shadow-sm focus:ring-2 focus:ring-primary-500 outline-none"
                 >
-                    <option value="TIP1">TIP 1</option>
+                    <option value="TIP1">TIP 1 (28/32 - 38/34)</option>
                     <option value="TIP2">TIP 2 (2XS-4XL)</option>
                     <option value="TIP3">TIP 3 (44-60)</option>
                 </select>

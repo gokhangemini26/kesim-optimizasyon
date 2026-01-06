@@ -216,15 +216,13 @@ function App() {
 
           // 3. CONSTRAINTS & FILTERS (The 6-Point Strategy)
 
-          // Constraint 5: MIN YIELD FILTER (Stricter)
+          // Constraint 5: MIN YIELD FILTER (Adaptive)
           const piecesPerLayer = group.length
           const totalPieces = piecesPerLayer * targetLayers
-          // Stricter filtering for main phase:
-          // If totalRemaining > 200, reject cuts with < 100 pieces OR < 25 layers (unless 80+ layers achieved)
-          if (totalRemainingQty > 200) {
-            if (totalPieces < 100) return
-            if (targetLayers < 30 && targetLayers < HARD_CAP) return
-          }
+          // Adaptive filtering based on remaining work:
+          // Only reject very small cuts (< 20 pieces) if we have substantial work left
+          if (totalRemainingQty > 500 && totalPieces < 40) return
+          if (totalRemainingQty > 200 && totalPieces < 20) return
 
           // Constraint 3: SMALL SIZE PROTECTION
           let isLimitedByFill = false

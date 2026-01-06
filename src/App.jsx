@@ -444,7 +444,7 @@ function App() {
 
     // ✅ 13. LOGLAMA
     if (user) {
-      const totalPlannedCount = summary.reduce((acc, row =>
+      const totalPlannedCount = summary.reduce((acc, row) =>
         acc + Object.values(row.planned).reduce((a, b) => a + b, 0), 0
       )
       await supabase.from('logs').insert([{

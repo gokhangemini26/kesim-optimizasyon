@@ -132,216 +132,311 @@ function App() {
   }
 
   const handlePreparePlan = async (data) => {
-    const { orderRows, groupingResults, avgConsumption } = data
-    if (!groupingResults) { alert("Lütfen kumaşları gruplandırın!"); return; }
+    const { orderRows, groupingResults, avgConsumption, consumptionMode, sizeConsumptions } = data
 
-    const initialDemands = JSON.parse(JSON.stringify(orderRows))
-    const currentDemands = {}
+    if (!groupingResults || !groupingResults.allGroups || groupingResults.allGroups.length === 0) {
+      alert("Lütfen kumaşları gruplandırın!")
+      return
+    }
+
+    // ✅ 1. TALEPLERİ HAZIRLA + %5 FAZLA EKLE
+    const colorDemands = {}
+
     orderRows.forEach(row => {
-      currentDemands[row.color] = {}
-      Object.entries(row.quantities).forEach(([size, qty]) => {
-        currentDemands[row.color][size] = parseInt(qty) || 0
+      if (!row.color || row.color.trim() === '') return
+
+      colorDemands[row.color] = {}
+      const sizes = Object.keys(row.quantities).filter(sz => (row.quantities[sz] || 0) > 0)
+
+      // Her beden için talep + %5 fazla (eşit dağıtılmış)
+      const totalDemand = Object.values(row.quantities).reduce((a, b) => (a || 0) + (b || 0), 0)
+      const extraTotal = Math.ceil(totalDemand * 0.05) // %5 fazla
+      const extraPerSize = Math.floor(extraTotal / sizes.length)
+      const remainder = extraTotal % sizes.length
+
+      sizes.forEach((size, idx) => {
+        const baseDemand = parseInt(row.quantities[size]) || 0
+        const extra = extraPerSize + (idx < remainder ? 1 : 0)
+        colorDemands[row.color][size] = baseDemand + extra
       })
     })
 
-    const fabricLots = [
+    console.log('📊 Talepler (%5 fazla dahil):', colorDemands)
+
+    // ✅ 2. TÜKETİM DEĞERLERİNİ HAZIRLA
+    const getConsumption = (size) => {
+      if (consumptionMode === 'SIZE') {
+        return parseFloat(sizeConsumptions[size]) || avgConsumption
+      }
+      return avgConsumption
+    }
+
+    // ✅ 3. KUMAŞ GRUPLARINI BİRLEŞTİR
+    // groupingResults 'Smart Grouping' ile sadece en uyumlu olanı kalip1'e koyuyor
+    const allFabricGroups = [
       ...groupingResults.kalip1.map(g => ({ ...g, mold: 'KALIP - 1' })),
       ...groupingResults.kalip2.map(g => ({ ...g, mold: 'KALIP - 2' }))
     ]
 
     const plans = []
     let cutNo = 1
+    const remainingDemands = JSON.parse(JSON.stringify(colorDemands))
 
-    fabricLots.forEach(lotGroup => {
-      let lotMetraj = lotGroup.totalMetraj
+    // ✅ 4. RENK BAZLI OPTİMİZASYON (Önce tek renk-tek lot)
+    const colors = Object.keys(colorDemands)
 
-      while (true) {
-        const globalDemand = {}
-        Object.values(currentDemands).forEach(colorDemand => {
-          Object.entries(colorDemand).forEach(([sz, qty]) => {
-            globalDemand[sz] = (globalDemand[sz] || 0) + qty
-          })
-        })
+    colors.forEach(color => {
+      const colorSizes = Object.keys(colorDemands[color]).sort((a, b) =>
+        String(a).localeCompare(String(b), undefined, { numeric: true })
+      )
 
-        const availableSizes = Object.keys(globalDemand).filter(s => globalDemand[s] > 0)
-        if (availableSizes.length === 0) break
+      // Bu renk için toplam talep
+      let colorTotalRemaining = Object.values(remainingDemands[color]).reduce((a, b) => a + b, 0)
 
-        const sizeGroups = generateSizeGroups(availableSizes)
-        let best = null
-        let maxScore = -1
+      // ✅ 5. HER KUMAŞ GRUBUNU DENE (En büyük metrajdan başla)
+      allFabricGroups.forEach(fabricGroup => {
+        if (colorTotalRemaining <= 0) return // Bu renk tamamlandı
 
-        sizeGroups.forEach(group => {
-          const markerLen = group.length * avgConsumption
-          if (markerLen === 0) return
+        const { lot, fabrics, totalMetraj, mold } = fabricGroup
 
-          const ratio = {}
-          group.forEach(s => ratio[s] = (ratio[s] || 0) + 1)
+        // ✅ 6. MARKER RATIO OLUŞTUR (Talebe göre oransal)
+        const markerRatio = {}
+        let totalRatioUnits = 0
 
-          const candidateLayers = [80]
-          Object.keys(ratio).forEach(s => {
-            candidateLayers.push(Math.floor(globalDemand[s] / ratio[s]))
-          })
-          candidateLayers.push(Math.floor(lotMetraj / markerLen))
-
-          const uniqueLayers = [...new Set(candidateLayers)].filter(l => l > 0 && l <= 80 && l * markerLen <= lotMetraj)
-          if (uniqueLayers.length === 0) return
-
-          uniqueLayers.forEach(layers => {
-            let usefulPieces = 0
-            const tempDemand = { ...globalDemand }
-
-            group.forEach(sz => {
-              const canTake = Math.min(layers, tempDemand[sz] || 0)
-              usefulPieces += canTake
-              tempDemand[sz] -= canTake
-            })
-
-            const uniqueness = new Set(group).size
-            const score = usefulPieces * 1000 + group.length * 10 + uniqueness
-
-            if (score > maxScore) {
-              maxScore = score
-              best = { group, layers, markerLen, ratio }
-            }
-          })
-        })
-
-        if (!best) break
-
-        // Initialize plan rows for each color with 0 layers
-        const colorAllocations = {}
-        Object.keys(currentDemands).forEach(color => {
-          colorAllocations[color] = { layers: 0, distinctNeed: 0 }
-        })
-
-        let remainingLayers = best.layers
-
-        // Greedy Layer Allocation Loop
-        // We assign layers one by one to the color that "needs" it most
-        while (remainingLayers > 0) {
-          let bestColor = null
-          let maxNeedScore = -1
-
-          // Calculate "Need Score" for each color
-          Object.entries(currentDemands).forEach(([color, demandMap]) => {
-            // A color needs this layer if it has demand for the sizes in the marker
-            // Score = Sum of pieces it would effectively use from 1 layer of this marker
-            let score = 0
-            best.group.forEach(sz => {
-              if ((demandMap[sz] || 0) > 0) {
-                score += 1
-                // We could weight this by demand magnitude, but simple binary need (needs/doesn't need) 
-                // often balances better for "cleaning up" orders. 
-                // Let's use: Score = How many USEFUL pieces this layer provides.
-              }
-            })
-
-            // Refine Score: Prioritize colors that have higher remaining demand
-            if (score > 0) {
-              // Add a tie-breaker based on total remaining demand for these sizes
-              let totalRemaining = 0
-              best.group.forEach(sz => totalRemaining += (demandMap[sz] || 0))
-              score = score * 1000 + totalRemaining
-            }
-
-            if (score > maxNeedScore && score > 0) {
-              maxNeedScore = score
-              bestColor = color
-            }
-          })
-
-          if (!bestColor) {
-            // No color needs what this marker produces anymore, but we have layers left.
-            // Force assign to the color with highest general demand or just first one to start filling
-            // In optimization, we usually stop here, but since 'best.layers' was calculated based on aggregate,
-            // we should find someone to take it.
-            // Let's pick the color with highest pending demand for ANY size in marker.
-            let maxGeneric = -1
-            Object.entries(currentDemands).forEach(([color, demandMap]) => {
-              let d = 0
-              best.group.forEach(sz => d += (demandMap[sz] || 0))
-              if (d > maxGeneric) { maxGeneric = d; bestColor = color }
-            })
+        colorSizes.forEach(size => {
+          const demand = remainingDemands[color][size] || 0
+          if (demand > 0) {
+            markerRatio[size] = 1 // Basit: Her bedenden 1'er
+            totalRatioUnits += 1
           }
+        })
 
-          if (bestColor) {
-            colorAllocations[bestColor].layers += 1
-            remainingLayers--
+        if (totalRatioUnits === 0) return
 
-            // Reduce demand for this assigned layer
-            // Note: A layer produces 'ratio[sz]' pieces for each size 'sz'
-            Object.entries(best.ratio).forEach(([sz, qtyPerLayer]) => {
-              currentDemands[bestColor][sz] = (currentDemands[bestColor][sz] || 0) - qtyPerLayer
-            })
-          } else {
-            // If absolutely no one wants it (all demands satisfied or negative), break to avoid infinite loop
-            // This might happen if best.layers was overshoot.
-            break;
-          }
-        }
+        // ✅ 7. MARKER UZUNLUĞU HESAPLA
+        let markerLength = 0
+        Object.entries(markerRatio).forEach(([size, count]) => {
+          markerLength += getConsumption(size) * count
+        })
 
+        if (markerLength === 0) return
+
+        // ✅ 8. MAKSİMUM KAT SAYISI
+        const maxLayersByFabric = Math.floor(totalMetraj / markerLength)
+
+        // Her beden için minimum kat sayısı
+        let maxLayersByDemand = Infinity
+        Object.entries(markerRatio).forEach(([size, ratio]) => {
+          const demand = remainingDemands[color][size] || 0
+          const layersNeeded = Math.ceil(demand / ratio)
+          maxLayersByDemand = Math.min(maxLayersByDemand, layersNeeded)
+        })
+
+        const totalLayers = Math.min(80, maxLayersByFabric, maxLayersByDemand)
+
+        if (totalLayers <= 0) return
+
+        // ✅ 9. ÜRETİLEN ADETLERİ HESAPLA VE TALEBİ GÜNCELLE
+        const producedQuantities = {}
+
+        Object.entries(markerRatio).forEach(([size, ratio]) => {
+          const produced = totalLayers * ratio
+          producedQuantities[size] = produced
+
+          // Talebi düş
+          remainingDemands[color][size] = Math.max(0, remainingDemands[color][size] - produced)
+        })
+
+        // ✅ 10. PLANI KAYDET
+        plans.push({
+          id: cutNo++,
+          shrinkage: `${mold} | LOT: ${lot}`,
+          lot: lot,
+          mold: mold,
+          totalLayers: totalLayers,
+          markerRatio: markerRatio,
+          markerLength: markerLength.toFixed(2),
+          rows: [{
+            colors: color,
+            layers: totalLayers,
+            quantities: producedQuantities
+          }],
+          fabrics: fabrics.map(f => f.topNo).join(', '),
+          usedMetraj: (totalLayers * markerLength).toFixed(2),
+          availableMetraj: totalMetraj.toFixed(2),
+          remainingMetraj: (totalMetraj - totalLayers * markerLength).toFixed(2)
+        })
+
+        // Kalan talebi güncelle
+        colorTotalRemaining = Object.values(remainingDemands[color]).reduce((a, b) => a + b, 0)
+      })
+    })
+
+    // ✅ 11. EKSİK KALAN TALEPLERİ TOPLA (Çok renkli kesim planları)
+    const hasRemainingDemands = Object.values(remainingDemands).some(colorDemand =>
+      Object.values(colorDemand).some(qty => qty > 0)
+    )
+
+    if (hasRemainingDemands) {
+      console.log('⚠️ Eksik talepler var, çok renkli kesim planı oluşturuluyor...')
+
+      // Kalan kumaşları kullan
+      allFabricGroups.forEach(fabricGroup => {
+        const { lot, fabrics, totalMetraj, mold } = fabricGroup
+
+        // Hangi renklerde talep var?
+        const colorsWithDemand = Object.keys(remainingDemands).filter(color =>
+          Object.values(remainingDemands[color]).some(qty => qty > 0)
+        )
+
+        if (colorsWithDemand.length === 0) return
+
+        // Tüm bedenleri topla
+        const allSizes = new Set()
+        colorsWithDemand.forEach(color => {
+          Object.keys(remainingDemands[color]).forEach(sz => {
+            if (remainingDemands[color][sz] > 0) {
+              allSizes.add(sz)
+            }
+          })
+        })
+
+        const sizesArray = Array.from(allSizes).sort((a, b) =>
+          String(a).localeCompare(String(b), undefined, { numeric: true })
+        )
+
+        if (sizesArray.length === 0) return
+
+        // Marker ratio
+        const markerRatio = {}
+        sizesArray.forEach(size => {
+          markerRatio[size] = 1
+        })
+
+        // Marker length
+        let markerLength = 0
+        sizesArray.forEach(size => {
+          markerLength += getConsumption(size)
+        })
+
+        const maxLayersByFabric = Math.floor(totalMetraj / markerLength)
+
+        // Her renk için ayrı satır
         const planRows = []
-        Object.entries(colorAllocations).forEach(([color, data]) => {
-          if (data.layers > 0) {
-            const rowQuantities = {}
-            // Calculate produced qtys for display: Layers * Marker Ratio
-            Object.entries(best.ratio).forEach(([sz, ratio]) => {
-              rowQuantities[sz] = data.layers * ratio
+        let totalLayersUsed = 0
+
+        colorsWithDemand.forEach(color => {
+          let minLayers = Infinity
+
+          sizesArray.forEach(size => {
+            const demand = remainingDemands[color][size] || 0
+            if (demand > 0) {
+              minLayers = Math.min(minLayers, Math.ceil(demand / (markerRatio[size] || 1)))
+            }
+          })
+
+          if (minLayers === Infinity || minLayers <= 0) return
+
+          const colorLayers = Math.min(minLayers, maxLayersByFabric - totalLayersUsed)
+
+          if (colorLayers > 0) {
+            const producedQuantities = {}
+
+            sizesArray.forEach(size => {
+              const produced = colorLayers * (markerRatio[size] || 0)
+              producedQuantities[size] = produced
+
+              if (remainingDemands[color][size]) {
+                remainingDemands[color][size] = Math.max(0, remainingDemands[color][size] - produced)
+              }
             })
 
             planRows.push({
               colors: color,
-              layers: data.layers,
-              quantities: rowQuantities
+              layers: colorLayers,
+              quantities: producedQuantities
             })
+
+            totalLayersUsed += colorLayers
           }
         })
 
-        plans.push({
-          id: cutNo++,
-          shrinkage: `${lotGroup.mold} | LOT: ${lotGroup.lot}`,
-          lot: lotGroup.lot,
-          mold: lotGroup.mold,
-          totalLayers: best.layers,
-          markerRatio: best.ratio,
-          rows: planRows,
-          fabrics: lotGroup.fabrics.map(f => f.topNo).join(', ')
-        })
+        if (planRows.length > 0) {
+          plans.push({
+            id: cutNo++,
+            shrinkage: `${mold} | LOT: ${lot}`,
+            lot: lot,
+            mold: mold,
+            totalLayers: totalLayersUsed,
+            markerRatio: markerRatio,
+            markerLength: markerLength.toFixed(2),
+            rows: planRows,
+            fabrics: fabrics.map(f => f.topNo).join(', '),
+            usedMetraj: (totalLayersUsed * markerLength).toFixed(2),
+            availableMetraj: totalMetraj.toFixed(2),
+            remainingMetraj: (totalMetraj - totalLayersUsed * markerLength).toFixed(2)
+          })
+        }
+      })
+    }
 
-        lotMetraj -= (best.layers * best.markerLen)
+    // ✅ 12. ÖZET RAPOR OLUŞTUR
+    const allSizesSet = new Set()
+    orderRows.forEach(order => {
+      Object.keys(order.quantities).forEach(sz => allSizesSet.add(sz))
+    })
+    const allSizes = Array.from(allSizesSet).sort((a, b) =>
+      String(a).localeCompare(String(b), undefined, { numeric: true })
+    )
+
+    const summary = orderRows.map(order => {
+      const originalDemanded = {}
+      const planned = {}
+
+      allSizes.forEach(sz => {
+        originalDemanded[sz] = parseInt(order.quantities[sz]) || 0
+        planned[sz] = 0
+
+        plans.forEach(plan => {
+          plan.rows.forEach(r => {
+            if (r.colors === order.color) {
+              planned[sz] += (r.quantities[sz] || 0)
+            }
+          })
+        })
+      })
+
+      return {
+        color: order.color,
+        demanded: originalDemanded, // Orijinal sipariş
+        demandedWithExtra: colorDemands[order.color], // %5 fazla dahil
+        planned: planned
       }
     })
 
-    const allSizesSet = new Set()
-    initialDemands.forEach(order => Object.keys(order.quantities).forEach(sz => allSizesSet.add(sz)))
-    const allSizes = Array.from(allSizesSet).sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }))
-
-    const summary = initialDemands.map(order => {
-      const planned = {}
-      allSizes.forEach(sz => {
-        planned[sz] = 0
-        plans.forEach(plan => plan.rows.forEach(r => {
-          if (r.colors === order.color) planned[sz] += (r.quantities[sz] || 0)
-        }))
-      })
-      return { color: order.color, demanded: order.quantities, planned }
-    })
-
-    // --- Log the run to Supabase ---
+    // ✅ 13. LOGLAMA
     if (user) {
-      const totalPlannedCount = summary.reduce((acc, row) => acc + Object.values(row.planned).reduce((a, b) => a + b, 0), 0)
+      const totalPlannedCount = summary.reduce((acc, row) =>
+        acc + Object.values(row.planned).reduce((a, b) => a + b, 0), 0
+      )
       await supabase.from('logs').insert([{
         user_id: user.id,
         action: 'OPTIMIZATION_RUN',
         details: {
           plans_count: plans.length,
           total_pieces: totalPlannedCount,
-          customer: selectedCustomer?.name
+          customer: selectedCustomer?.name,
+          extra_percentage: 5
         }
       }])
     }
 
-    setResults(plans); setOptimizationSummary(summary); navigate('/results')
+    console.log('✅ Oluşturulan Planlar:', plans)
+    console.log('📊 Özet Rapor:', summary)
+
+    setResults(plans)
+    setOptimizationSummary(summary)
+    navigate('/results')
   }
 
   return (

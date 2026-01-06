@@ -1,5 +1,5 @@
 import React from 'react'
-import { ArrowLeft, Download, FileText, Layers, Ruler, CheckCircle2, AlertCircle, TrendingDown } from 'lucide-react'
+import { ArrowLeft, Download, FileText, Layers, Ruler, CheckCircle2, AlertCircle, TrendingUp, TrendingDown, Info } from 'lucide-react'
 import * as XLSX from 'xlsx'
 import { jsPDF } from 'jspdf'
 import autoTable from 'jspdf-autotable'
@@ -12,12 +12,22 @@ export default function ResultsView({ plans, summary, onBack }) {
         )
         : []
 
-    // Global totals for the summary footer
-    const totalDemanded = summary ? summary.reduce((acc, item) => acc + Object.values(item.demanded).reduce((a, b) => a + b, 0), 0) : 0
-    const totalPlanned = summary ? summary.reduce((acc, item) => acc + Object.values(item.planned).reduce((a, b) => a + b, 0), 0) : 0
-    const totalMissing = Math.max(0, totalDemanded - totalPlanned)
+    // Global totals
+    const totalOriginalDemand = summary ? summary.reduce((acc, item) =>
+        acc + Object.values(item.demanded).reduce((a, b) => a + b, 0), 0
+    ) : 0
 
-    // Helper to sanitize Turkish characters for basic PDF fonts
+    const totalWithExtra = summary ? summary.reduce((acc, item) =>
+        acc + Object.values(item.demandedWithExtra || item.demanded).reduce((a, b) => a + b, 0), 0
+    ) : 0
+
+    const totalPlanned = summary ? summary.reduce((acc, item) =>
+        acc + Object.values(item.planned).reduce((a, b) => a + b, 0), 0
+    ) : 0
+
+    const totalExtra = totalPlanned - totalOriginalDemand
+
+    // Helper to sanitize Turkish characters
     const trFix = (str) => {
         if (!str) return ""
         return String(str)
@@ -29,39 +39,38 @@ export default function ResultsView({ plans, summary, onBack }) {
             .replace(/Ç/g, 'C').replace(/ç/g, 'c')
     }
 
-    // --- Export to Excel ---
+    // Export to Excel
     const exportToExcel = () => {
         const wb = XLSX.utils.book_new()
 
-        // 1. Summary Sheet
+        // Summary Sheet
         const summaryData = summary.map(item => {
             const row = { 'RENK': item.color }
             globalSizes.forEach(size => {
-                row[`BEDEN ${size} (T)`] = item.demanded[size] || 0
-                row[`BEDEN ${size} (P)`] = item.planned[size] || 0
+                row[`${size} (SİPARİŞ)`] = item.demanded[size] || 0
+                row[`${size} (PLAN)`] = item.planned[size] || 0
+                row[`${size} (FARK)`] = (item.planned[size] || 0) - (item.demanded[size] || 0)
             })
             const totalP = Object.values(item.planned).reduce((a, b) => a + b, 0)
             const totalD = Object.values(item.demanded).reduce((a, b) => a + b, 0)
+            row['TOPLAM SİPARİŞ'] = totalD
             row['TOPLAM PLAN'] = totalP
             row['FARK'] = totalP - totalD
             return row
         })
         const wsSummary = XLSX.utils.json_to_sheet(summaryData)
-        XLSX.utils.book_append_sheet(wb, wsSummary, "Özet Rapor")
+        XLSX.utils.book_append_sheet(wb, wsSummary, "Ozet Rapor")
 
-        // 2. Individual Plans Sheets
+        // Individual Plans
         plans.forEach((plan, idx) => {
             const planData = []
-            // Header info
             planData.push(['KESİM NO', plan.id, 'LOT', plan.lot, 'KALIP', plan.mold])
             planData.push(['TOPLAM KAT', plan.totalLayers, 'KUMAŞLAR', plan.fabrics])
-            planData.push([]) // Spacer
+            planData.push([])
 
-            // Table Header
-            const headers = ['RENK / KAT', ...Object.keys(plan.markerRatio).map(s => `BEDEN ${s} (x${plan.markerRatio[s]})`), 'TOPLAM']
+            const headers = ['RENK / KAT', ...Object.keys(plan.markerRatio).map(s => `${s} (x${plan.markerRatio[s]})`), 'TOPLAM']
             planData.push(headers)
 
-            // Table Body
             plan.rows.forEach(row => {
                 const dataRow = [`${row.colors} (${row.layers} Kat)`]
                 Object.keys(plan.markerRatio).forEach(sz => {
@@ -78,28 +87,27 @@ export default function ResultsView({ plans, summary, onBack }) {
         XLSX.writeFile(wb, "Kesim_Plani_Raporu.xlsx")
     }
 
-    // --- Export to PDF ---
+    // Export to PDF
     const exportToPDF = () => {
         const doc = new jsPDF()
         const timestamp = new Date().toLocaleString('tr-TR')
 
-        // Title
         doc.setFontSize(18)
         doc.text(trFix("HAZIRLANAN KESIM PLANLARI"), 14, 20)
         doc.setFontSize(10)
         doc.text(`Tarih: ${timestamp}`, 14, 28)
 
-        // Summary Section
         doc.setFontSize(14)
         doc.text(trFix("OZET RAPOR"), 14, 40)
 
-        const summaryHeaders = [['RENK', ...globalSizes, 'TOPLAM', 'EKSIK']]
+        const summaryHeaders = [['RENK', ...globalSizes, 'SIPARIS', 'PLAN', 'FARK']]
         const summaryBody = summary.map(item => {
             const totalP = Object.values(item.planned).reduce((a, b) => a + b, 0)
             const totalD = Object.values(item.demanded).reduce((a, b) => a + b, 0)
             return [
                 trFix(item.color),
                 ...globalSizes.map(sz => item.planned[sz] || 0),
+                totalD,
                 totalP,
                 totalP - totalD
             ]
@@ -113,10 +121,9 @@ export default function ResultsView({ plans, summary, onBack }) {
             headStyles: { fillColor: [15, 23, 42] }
         })
 
-        // Plans Section
         let currentY = doc.lastAutoTable.finalY + 20
 
-        plans.forEach((plan, idx) => {
+        plans.forEach((plan) => {
             if (currentY > 240) {
                 doc.addPage()
                 currentY = 20
@@ -125,12 +132,14 @@ export default function ResultsView({ plans, summary, onBack }) {
             doc.setFontSize(14)
             doc.text(trFix(`KESIM #${plan.id} - ${plan.shrinkage}`), 14, currentY)
             doc.setFontSize(10)
-            doc.text(trFix(`Lot: ${plan.lot} | Kat: ${plan.totalLayers} | Kumaslar: ${plan.fabrics}`), 14, currentY + 6)
+            doc.text(trFix(`Lot: ${plan.lot} | Kat: ${plan.totalLayers}`), 14, currentY + 6)
 
-            const planSizes = Object.keys(plan.markerRatio).sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }))
-            const headers = [['RENK / SERIM', ...planSizes.map(s => `${s} (x${plan.markerRatio[s]})`), 'TOPLAM']]
+            const planSizes = Object.keys(plan.markerRatio).sort((a, b) =>
+                String(a).localeCompare(String(b), undefined, { numeric: true })
+            )
+            const headers = [['RENK', ...planSizes.map(s => `${s}`), 'TOPLAM']]
             const body = plan.rows.map(row => [
-                trFix(`${row.colors} (${row.layers} Kat)`),
+                trFix(`${row.colors} (${row.layers})`),
                 ...planSizes.map(sz => row.quantities[sz] || 0),
                 Object.values(row.quantities).reduce((a, b) => a + b, 0)
             ])
@@ -151,41 +160,37 @@ export default function ResultsView({ plans, summary, onBack }) {
 
     return (
         <div className="max-w-7xl mx-auto p-4 md:p-8 pb-32">
-            {/* Header Section */}
+            {/* Header */}
             <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-8">
                 <div>
-                    <button
-                        onClick={onBack}
-                        className="flex items-center gap-2 text-slate-500 hover:text-slate-900 font-bold transition-colors mb-2"
-                    >
+                    <button onClick={onBack} className="flex items-center gap-2 text-slate-500 hover:text-slate-900 font-bold transition-colors mb-2">
                         <ArrowLeft size={20} />
                         Veri Girişine Dön
                     </button>
-                    <h1 className="text-3xl font-black text-slate-900 font-primary">Hazırlanan Kesim Planları</h1>
-                    <p className="text-slate-500">Optimizasyon kısıtlarına uygun olarak hazırlanan {plans.length} adet kesim emri.</p>
+                    <h1 className="text-3xl font-black text-slate-900">Hazırlanan Kesim Planları</h1>
+                    <p className="text-slate-500">Toplam {plans.length} adet kesim planı oluşturuldu.</p>
+
+                    {/* %5 Fazla Bilgisi */}
+                    <div className="mt-3 flex items-center gap-2 bg-blue-50 text-blue-700 px-4 py-2 rounded-xl border border-blue-100 w-fit">
+                        <Info size={16} />
+                        <span className="text-sm font-bold">%5 Fazla Kesim Dahil Edildi</span>
+                    </div>
                 </div>
                 <div className="flex gap-3">
-                    <button
-                        onClick={exportToExcel}
-                        className="bg-white border border-slate-200 text-slate-700 font-bold py-3 px-6 rounded-2xl flex items-center gap-2 hover:bg-slate-50 transition-all shadow-sm"
-                    >
+                    <button onClick={exportToExcel} className="bg-white border border-slate-200 text-slate-700 font-bold py-3 px-6 rounded-2xl flex items-center gap-2 hover:bg-slate-50 transition-all shadow-sm">
                         <Download size={20} />
                         Excel'e Aktar
                     </button>
-                    <button
-                        onClick={exportToPDF}
-                        className="bg-primary-600 text-white font-bold py-3 px-6 rounded-2xl flex items-center gap-2 hover:bg-primary-700 transition-all shadow-lg shadow-primary-200"
-                    >
+                    <button onClick={exportToPDF} className="bg-primary-600 text-white font-bold py-3 px-6 rounded-2xl flex items-center gap-2 hover:bg-primary-700 transition-all shadow-lg shadow-primary-200">
                         <FileText size={20} />
                         PDF İndir
                     </button>
                 </div>
             </div>
 
-            {/* Cutting Plans Section */}
+            {/* Cutting Plans */}
             <div className="space-y-12">
                 {plans.map((group) => {
-                    // Dynamic sizes for THIS specific plan
                     const planSizes = Object.keys(group.markerRatio).sort((a, b) =>
                         String(a).localeCompare(String(b), undefined, { numeric: true })
                     )
@@ -198,7 +203,7 @@ export default function ResultsView({ plans, summary, onBack }) {
                                         <span className={`text-[10px] font-black uppercase tracking-widest px-2 py-1 rounded-md text-white ${group.mold === 'KALIP - 1' ? 'bg-emerald-500' : 'bg-amber-500'}`}>
                                             KESİM #{group.id}
                                         </span>
-                                        <h2 className="text-3xl font-black text-slate-900 font-primary tracking-tight">
+                                        <h2 className="text-3xl font-black text-slate-900 tracking-tight">
                                             {group.shrinkage}
                                         </h2>
                                     </div>
@@ -278,12 +283,12 @@ export default function ResultsView({ plans, summary, onBack }) {
                 })}
             </div>
 
-            {/* --- Global Summary Report --- */}
+            {/* Summary Report */}
             {summary && (
                 <div className="mt-20">
                     <div className="flex items-center gap-4 mb-8">
                         <div className="h-1 flex-1 bg-slate-200 rounded-full"></div>
-                        <h2 className="text-3xl font-black text-slate-900 uppercase tracking-tighter flex items-center gap-3 font-primary">
+                        <h2 className="text-3xl font-black text-slate-900 uppercase tracking-tighter flex items-center gap-3">
                             <CheckCircle2 className="text-emerald-500 w-8 h-8" />
                             KESİM ÖZET RAPORU
                         </h2>
@@ -295,7 +300,7 @@ export default function ResultsView({ plans, summary, onBack }) {
                             <table className="w-full text-center border-collapse">
                                 <thead>
                                     <tr className="bg-slate-900 text-white">
-                                        <th className="p-6 text-left font-black uppercase tracking-widest text-xs border-r border-slate-800">RENK / DURUM</th>
+                                        <th className="p-6 text-left font-black uppercase tracking-widest text-xs border-r border-slate-800">RENK</th>
                                         {globalSizes.map(size => (
                                             <th key={size} className="p-6 border-r border-slate-800">
                                                 <div className="text-[10px] font-bold text-slate-400 mb-1">BEDEN</div>
@@ -310,9 +315,9 @@ export default function ResultsView({ plans, summary, onBack }) {
                                 </thead>
                                 <tbody>
                                     {summary.map((item, idx) => {
-                                        const totalDemandedRow = Object.values(item.demanded).reduce((a, b) => a + b, 0)
+                                        const totalOriginal = Object.values(item.demanded).reduce((a, b) => a + b, 0)
                                         const totalPlannedRow = Object.values(item.planned).reduce((a, b) => a + b, 0)
-                                        const diffRow = totalPlannedRow - totalDemandedRow
+                                        const diffRow = totalPlannedRow - totalOriginal
 
                                         return (
                                             <tr key={idx} className="border-b border-slate-100 hover:bg-slate-50/50 transition-colors">
@@ -321,20 +326,19 @@ export default function ResultsView({ plans, summary, onBack }) {
                                                     <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">SİPARİŞ DETAYI</div>
                                                 </td>
                                                 {globalSizes.map(size => {
-                                                    const d = item.demanded[size] || 0
-                                                    const p = item.planned[size] || 0
-                                                    const sDiff = p - d
-                                                    const isMissing = sDiff < 0
+                                                    const original = item.demanded[size] || 0
+                                                    const planned = item.planned[size] || 0
+                                                    const sDiff = planned - original
 
                                                     return (
-                                                        <td key={size} className={`p-4 border-r border-slate-100 ${isMissing ? 'bg-red-50/50' : ''}`}>
+                                                        <td key={size} className="p-4 border-r border-slate-100">
                                                             <div className="flex flex-col items-center">
                                                                 <div className="text-[10px] text-slate-400 font-black mb-1">
-                                                                    T: <span className="text-slate-600">{d}</span>
+                                                                    SİP: <span className="text-slate-600">{original}</span>
                                                                 </div>
-                                                                <div className={`text-2xl font-black ${isMissing ? 'text-red-600' : 'text-slate-900'}`}>{p}</div>
+                                                                <div className="text-2xl font-black text-slate-900">{planned}</div>
                                                                 {sDiff !== 0 && (
-                                                                    <div className={`text-[10px] font-black px-1.5 py-0.5 rounded mt-1 shadow-sm ${sDiff > 0 ? 'bg-amber-100 text-amber-700' : 'bg-red-600 text-white'}`}>
+                                                                    <div className={`text-[10px] font-black px-1.5 py-0.5 rounded mt-1 shadow-sm ${sDiff > 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>
                                                                         {sDiff > 0 ? `+${sDiff}` : sDiff}
                                                                     </div>
                                                                 )}
@@ -342,12 +346,12 @@ export default function ResultsView({ plans, summary, onBack }) {
                                                         </td>
                                                     )
                                                 })}
-                                                <td className={`p-6 border-l w-40 ${diffRow === 0 ? 'bg-emerald-50/50' : diffRow > 0 ? 'bg-amber-50/50' : 'bg-red-50/50'}`}>
+                                                <td className={`p-6 border-l w-40 ${diffRow >= 0 ? 'bg-emerald-50/50' : 'bg-red-50/50'}`}>
                                                     <div className="flex flex-col items-center justify-center">
-                                                        <div className={`text-2xl font-black mb-1 ${diffRow < 0 ? 'text-red-600' : 'text-slate-900'}`}>{totalPlannedRow}</div>
-                                                        <div className={`text-[10px] font-black px-2 py-1 rounded-lg uppercase tracking-widest flex items-center gap-1 ${diffRow === 0 ? 'bg-emerald-500 text-white' : diffRow > 0 ? 'bg-amber-500 text-white' : 'bg-red-600 text-white'}`}>
-                                                            {diffRow === 0 ? <CheckCircle2 size={12} /> : <AlertCircle size={12} />}
-                                                            {diffRow === 0 ? 'TAMAM' : diffRow > 0 ? `FAZLA (+${diffRow})` : `EKSİK (${diffRow})`}
+                                                        <div className="text-2xl font-black text-slate-900 mb-1">{totalPlannedRow}</div>
+                                                        <div className={`text-[10px] font-black px-2 py-1 rounded-lg uppercase tracking-widest flex items-center gap-1 ${diffRow >= 0 ? 'bg-emerald-500 text-white' : 'bg-red-600 text-white'}`}>
+                                                            {diffRow >= 0 ? <TrendingUp size={12} /> : <TrendingDown size={12} />}
+                                                            {diffRow >= 0 ? `+${diffRow}` : diffRow}
                                                         </div>
                                                     </div>
                                                 </td>
@@ -358,33 +362,27 @@ export default function ResultsView({ plans, summary, onBack }) {
                             </table>
                         </div>
 
-                        {/* Total Statistics Footer */}
+                        {/* Footer Statistics */}
                         <div className="p-8 bg-slate-900 text-white flex flex-col md:flex-row justify-between items-center gap-8">
                             <div className="flex flex-wrap gap-8 md:gap-16">
                                 <div>
-                                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-[0.2em] block mb-2">TOPLAM SİPARİŞ TALEBİ</span>
-                                    <span className="text-4xl font-black">
-                                        {totalDemanded}
-                                    </span>
+                                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-[0.2em] block mb-2">ORİJİNAL SİPARİŞ</span>
+                                    <span className="text-4xl font-black">{totalOriginalDemand}</span>
                                 </div>
                                 <div className="hidden md:block h-16 w-px bg-slate-800"></div>
                                 <div>
                                     <span className="text-[10px] font-bold text-emerald-500 uppercase tracking-[0.2em] block mb-2">TOPLAM PLANLANAN</span>
-                                    <span className="text-4xl font-black text-emerald-400">
-                                        {totalPlanned}
-                                    </span>
+                                    <span className="text-4xl font-black text-emerald-400">{totalPlanned}</span>
                                 </div>
                             </div>
 
                             <div className="flex items-center gap-8 bg-white/5 p-6 rounded-[30px] border border-white/10">
                                 <div className="text-right">
-                                    <span className="text-[10px] font-bold text-red-400 uppercase tracking-[0.2em] block mb-1">TOPLAM EKSİK ADET</span>
-                                    <span className={`text-3xl font-black ${totalMissing > 0 ? 'text-red-500' : 'text-emerald-500'}`}>
-                                        {totalMissing}
-                                    </span>
+                                    <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-[0.2em] block mb-1">FAZLA KESİLEN (%5)</span>
+                                    <span className="text-3xl font-black text-emerald-500">+{totalExtra}</span>
                                 </div>
-                                <div className={`p-3 rounded-2xl shadow-xl ${totalMissing > 0 ? 'bg-red-500 shadow-red-500/20' : 'bg-emerald-500 shadow-emerald-500/20'}`}>
-                                    {totalMissing > 0 ? <TrendingDown className="text-white w-8 h-8" /> : <CheckCircle2 className="text-white w-8 h-8" />}
+                                <div className="p-3 rounded-2xl shadow-xl bg-emerald-500 shadow-emerald-500/20">
+                                    <TrendingUp className="text-white w-8 h-8" />
                                 </div>
                             </div>
                         </div>

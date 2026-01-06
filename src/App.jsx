@@ -164,183 +164,233 @@ function App() {
     const DEEP_CUT_THRESHOLD = 65
     const IDEAL_PIECES_PER_CUT = 160 // 4 sizes * 40 layers approx
 
-    // NEW STRUCTURE: Color-first, Lot-second
-    // For each color, cut maximally from each lot before moving to the next lot
+    // ========== REVERSE PYRAMID GLOBAL OPTIMIZATION ==========
+    // Phase 1: Single-color deep cuts (80×4 → 1×1)
+    // Phase 2: Multi-color cleanup (last resort)
 
-    const colors = Object.keys(currentDemands)
+    const calcMarkerLen = (sizes) => {
+      let len = 0
+      sizes.forEach(s => {
+        const cons = (consumptionMode === 'SIZE' ? parseFloat(sizeConsumptions[s]) : 0) || avgConsumption
+        len += cons
+      })
+      return len
+    }
 
-    colors.forEach(color => {
-      const colorDemand = currentDemands[color]
+    const getCombinations = (arr, n) => {
+      if (n === 1) return arr.map(x => [x])
+      if (n > arr.length) return []
+      const result = []
+      for (let i = 0; i <= arr.length - n; i++) {
+        const head = arr[i]
+        const tailCombos = getCombinations(arr.slice(i + 1), n - 1)
+        tailCombos.forEach(combo => result.push([head, ...combo]))
+      }
+      return result
+    }
 
-      // Iterate through lots for this color
-      fabricLots.forEach(lotGroup => {
-        if (lotGroup.totalMetraj <= 0) return // Skip exhausted lots
+    // Get all unique sizes across all colors
+    const optAllSizes = [...new Set(Object.values(currentDemands).flatMap(d => Object.keys(d)))]
+      .sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }))
 
-        let lotMetraj = lotGroup.totalMetraj
-        let loopSafety = 0
+    // PHASE 1: Single-color optimization with Reverse Pyramid
+    let loopSafety = 0
+    while (loopSafety++ < 500) {
+      // Find the best cut across ALL colors
+      let globalBest = null
 
-        while (loopSafety++ < 200) {
-          // Check if this color still has demand
-          const colorSizes = Object.keys(colorDemand).filter(s => colorDemand[s] > 0)
-          if (colorSizes.length === 0) break
-          if (lotMetraj <= 0) break
+      // Iterate through colors to find the best single-color cut
+      Object.entries(currentDemands).forEach(([color, colorDemand]) => {
+        const colorSizes = Object.keys(colorDemand).filter(s => colorDemand[s] > 0)
+        if (colorSizes.length === 0) return
 
-          const totalColorDemand = colorSizes.reduce((sum, s) => sum + colorDemand[s], 0)
+        // Find available lot with fabric
+        const availableLot = fabricLots.find(lot => lot.totalMetraj > 0)
+        if (!availableLot) return
 
-          // ========== TOP-DOWN LAYER SEARCH ALGORITHM ==========
-          // Goal: Find the best cut (highest layers * most sizes)
-          // Method: For each layer count from 80 down, check 4/3/2/1 size combinations
+        // Reverse Pyramid: Start from MAX (80×4=320) and work down
+        // Collect all valid cuts, then pick the best
+        const validCuts = []
 
-          let best = null
+        for (let sizeCount = Math.min(4, colorSizes.length); sizeCount >= 1; sizeCount--) {
+          const combos = getCombinations(colorSizes, sizeCount)
 
-          // Helper: Check if a size combination can support N layers
-          const canSupportLayers = (sizes, targetLayers) => {
-            for (const s of sizes) {
-              if ((colorDemand[s] || 0) < targetLayers) return false
+          for (const combo of combos) {
+            // Find max layers this combo can support from demand
+            let maxLayersDemand = Infinity
+            for (const s of combo) {
+              maxLayersDemand = Math.min(maxLayersDemand, colorDemand[s] || 0)
             }
-            return true
-          }
+            if (maxLayersDemand === 0) continue
 
-          // Helper: Calculate marker length for a combination
-          const calcMarkerLen = (sizes) => {
-            let len = 0
-            sizes.forEach(s => {
-              const cons = (consumptionMode === 'SIZE' ? parseFloat(sizeConsumptions[s]) : 0) || avgConsumption
-              len += cons
+            // Check fabric constraint
+            const markerLen = calcMarkerLen(combo)
+            if (markerLen === 0) continue
+            const maxLayersFabric = Math.floor(availableLot.totalMetraj / markerLen)
+
+            const targetLayers = Math.min(HARD_CAP, maxLayersDemand, maxLayersFabric)
+            if (targetLayers <= 0) continue
+
+            const totalPieces = combo.length * targetLayers
+
+            validCuts.push({
+              color,
+              lot: availableLot,
+              group: combo,
+              ratio: Object.fromEntries(combo.map(s => [s, 1])),
+              markerLen,
+              targetLayers,
+              totalPieces,
+              sizeCount: combo.length
             })
-            return len
           }
+        }
 
-          // Helper: Generate all N-size combinations from available sizes
-          const getCombinations = (arr, n) => {
-            if (n === 1) return arr.map(x => [x])
-            if (n > arr.length) return []
-            const result = []
-            for (let i = 0; i <= arr.length - n; i++) {
-              const head = arr[i]
-              const tailCombos = getCombinations(arr.slice(i + 1), n - 1)
-              tailCombos.forEach(combo => result.push([head, ...combo]))
-            }
-            return result
+        // Pick the best cut for this color (most pieces)
+        if (validCuts.length > 0) {
+          validCuts.sort((a, b) => b.totalPieces - a.totalPieces)
+          const colorBest = validCuts[0]
+
+          if (!globalBest || colorBest.totalPieces > globalBest.totalPieces) {
+            globalBest = colorBest
           }
-
-          // Sort sizes by demand (highest first) for better combinations
-          const sortedSizes = [...colorSizes].sort((a, b) =>
-            (colorDemand[b] || 0) - (colorDemand[a] || 0)
-          )
-
-          // COLLECT ALL VALID COMBINATIONS
-          // Then pick the one with MOST TOTAL PIECES (layers × sizes)
-          const allValidCuts = []
-
-          for (let sizeCount = Math.min(4, sortedSizes.length); sizeCount >= 1; sizeCount--) {
-            const combos = getCombinations(sortedSizes, sizeCount)
-
-            for (const combo of combos) {
-              // Find max layers this combo can support
-              let maxLayersDemand = Infinity
-              for (const s of combo) {
-                maxLayersDemand = Math.min(maxLayersDemand, colorDemand[s] || 0)
-              }
-              if (maxLayersDemand === 0) continue
-
-              // Check fabric constraint
-              const markerLen = calcMarkerLen(combo)
-              if (markerLen === 0) continue
-              const maxLayersFabric = Math.floor(lotMetraj / markerLen)
-
-              const targetLayers = Math.min(HARD_CAP, maxLayersDemand, maxLayersFabric)
-              if (targetLayers <= 0) continue
-
-              const totalPieces = combo.length * targetLayers
-
-              const ratio = {}
-              combo.forEach(s => ratio[s] = 1)
-
-              allValidCuts.push({
-                group: combo,
-                ratio,
-                markerLen,
-                targetLayers,
-                totalPieces,
-                sizeCount: combo.length,
-                selectionReason: `${combo.length}x @ ${targetLayers}L`
-              })
-            }
-          }
-
-          // SELECTION: Pick by TOTAL PIECES (primary), then LAYER COUNT (tiebreaker)
-          if (allValidCuts.length > 0) {
-            allValidCuts.sort((a, b) => {
-              // Primary: Most total pieces
-              if (b.totalPieces !== a.totalPieces) return b.totalPieces - a.totalPieces
-              // Tiebreaker: More layers
-              if (b.targetLayers !== a.targetLayers) return b.targetLayers - a.targetLayers
-              // Tiebreaker: More sizes
-              return b.sizeCount - a.sizeCount
-            })
-            best = allValidCuts[0]
-          }
-
-          // If no valid cut found with normal search, allow 1-layer cleanup
-          if (!best && totalColorDemand > 0 && lotMetraj > 0) {
-            // Cleanup: Just take whatever we can
-            for (const s of sortedSizes) {
-              const demand = colorDemand[s] || 0
-              if (demand > 0) {
-                const cons = (consumptionMode === 'SIZE' ? parseFloat(sizeConsumptions[s]) : 0) || avgConsumption
-                const maxFabric = Math.floor(lotMetraj / cons)
-                const layers = Math.min(demand, maxFabric, HARD_CAP)
-                if (layers > 0) {
-                  best = {
-                    group: [s],
-                    ratio: { [s]: 1 },
-                    markerLen: cons,
-                    targetLayers: layers,
-                    totalPieces: layers,
-                    selectionReason: 'Cleanup'
-                  }
-                  break
-                }
-              }
-            }
-          }
-
-          if (!best) break
-
-          // EXECUTE: Cut for this color from this lot
-          const layers = best.targetLayers
-          const producedQuantities = {}
-
-          Object.entries(best.ratio).forEach(([sz, r]) => {
-            const qty = layers * r
-            producedQuantities[sz] = qty
-            colorDemand[sz] = Math.max(0, (colorDemand[sz] || 0) - qty)
-          })
-
-          const usedMetraj = layers * best.markerLen
-          lotMetraj -= usedMetraj
-          lotGroup.totalMetraj -= usedMetraj // Update the actual lot
-
-          plans.push({
-            id: cutNo++,
-            shrinkage: `${lotGroup.mold} | LOT: ${lotGroup.lot}`,
-            lot: lotGroup.lot,
-            mold: lotGroup.mold,
-            totalLayers: layers,
-            markerRatio: best.ratio,
-            markerLength: best.markerLen.toFixed(2),
-            rows: [{
-              colors: color,
-              layers: layers,
-              quantities: producedQuantities
-            }],
-            fabrics: lotGroup.fabrics.map(f => f.topNo).join(', '),
-            note: `Color: ${color} | ${best.selectionReason}`
-          })
         }
       })
-    })
+
+      if (!globalBest) break // No more single-color cuts possible
+
+      // EXECUTE the best cut
+      const { color, lot, group, ratio, markerLen, targetLayers, totalPieces } = globalBest
+
+      const producedQuantities = {}
+      group.forEach(sz => {
+        const qty = targetLayers
+        producedQuantities[sz] = qty
+        currentDemands[color][sz] = Math.max(0, (currentDemands[color][sz] || 0) - qty)
+      })
+
+      const usedMetraj = targetLayers * markerLen
+      lot.totalMetraj -= usedMetraj
+
+      plans.push({
+        id: cutNo++,
+        shrinkage: `${lot.mold} | LOT: ${lot.lot}`,
+        lot: lot.lot,
+        mold: lot.mold,
+        totalLayers: targetLayers,
+        markerRatio: ratio,
+        markerLength: markerLen.toFixed(2),
+        rows: [{
+          colors: color,
+          layers: targetLayers,
+          quantities: producedQuantities
+        }],
+        fabrics: lot.fabrics.map(f => f.topNo).join(', '),
+        note: `Phase1: ${group.length}x @ ${targetLayers}L = ${totalPieces}pcs`
+      })
+    }
+
+    // PHASE 2: Multi-color cleanup (last resort)
+    // Consolidate remaining small demands across colors
+    loopSafety = 0
+    while (loopSafety++ < 200) {
+      // Consolidate remaining demand across all colors
+      const globalDemand = {}
+      Object.entries(currentDemands).forEach(([color, colorDemand]) => {
+        Object.entries(colorDemand).forEach(([sz, qty]) => {
+          if (qty > 0) {
+            if (!globalDemand[sz]) globalDemand[sz] = { total: 0, colors: [] }
+            globalDemand[sz].total += qty
+            globalDemand[sz].colors.push({ color, qty })
+          }
+        })
+      })
+
+      const remainingSizes = Object.keys(globalDemand).filter(s => globalDemand[s].total > 0)
+      if (remainingSizes.length === 0) break
+
+      const availableLot = fabricLots.find(lot => lot.totalMetraj > 0)
+      if (!availableLot) break
+
+      // Find best multi-color cut
+      let best = null
+      const validCuts = []
+
+      for (let sizeCount = Math.min(4, remainingSizes.length); sizeCount >= 1; sizeCount--) {
+        const combos = getCombinations(remainingSizes, sizeCount)
+
+        for (const combo of combos) {
+          // Max layers = min of total demand across combo sizes
+          let maxLayersDemand = Infinity
+          for (const s of combo) {
+            maxLayersDemand = Math.min(maxLayersDemand, globalDemand[s].total)
+          }
+          if (maxLayersDemand === 0) continue
+
+          const markerLen = calcMarkerLen(combo)
+          if (markerLen === 0) continue
+          const maxLayersFabric = Math.floor(availableLot.totalMetraj / markerLen)
+
+          const targetLayers = Math.min(HARD_CAP, maxLayersDemand, maxLayersFabric)
+          if (targetLayers <= 0) continue
+
+          validCuts.push({
+            lot: availableLot,
+            group: combo,
+            markerLen,
+            targetLayers,
+            totalPieces: combo.length * targetLayers
+          })
+        }
+      }
+
+      if (validCuts.length === 0) break
+
+      validCuts.sort((a, b) => b.totalPieces - a.totalPieces)
+      best = validCuts[0]
+
+      // Distribute layers to colors proportionally
+      const planRows = []
+      let remainingLayers = best.targetLayers
+
+      best.group.forEach(sz => {
+        const sizeColors = globalDemand[sz].colors.sort((a, b) => b.qty - a.qty)
+        let layersForSize = best.targetLayers
+
+        sizeColors.forEach(({ color, qty }) => {
+          if (layersForSize <= 0) return
+          const layersToUse = Math.min(qty, layersForSize)
+
+          // Find or create row for this color
+          let row = planRows.find(r => r.colors === color)
+          if (!row) {
+            row = { colors: color, layers: 0, quantities: {} }
+            planRows.push(row)
+          }
+          row.quantities[sz] = (row.quantities[sz] || 0) + layersToUse
+          row.layers = Math.max(row.layers, layersToUse)
+
+          currentDemands[color][sz] = Math.max(0, currentDemands[color][sz] - layersToUse)
+          layersForSize -= layersToUse
+        })
+      })
+
+      const usedMetraj = best.targetLayers * best.markerLen
+      best.lot.totalMetraj -= usedMetraj
+
+      plans.push({
+        id: cutNo++,
+        shrinkage: `${best.lot.mold} | LOT: ${best.lot.lot}`,
+        lot: best.lot.lot,
+        mold: best.lot.mold,
+        totalLayers: best.targetLayers,
+        markerRatio: Object.fromEntries(best.group.map(s => [s, 1])),
+        markerLength: best.markerLen.toFixed(2),
+        rows: planRows,
+        fabrics: best.lot.fabrics.map(f => f.topNo).join(', '),
+        note: `Phase2 (MultiColor): ${best.group.length}x @ ${best.targetLayers}L`
+      })
+    }
 
     console.log('✅ Scoring Engine Sonuçları:', plans)
 

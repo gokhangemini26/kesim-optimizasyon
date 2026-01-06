@@ -20,7 +20,7 @@ function App() {
   const [orderRows, setOrderRows] = useState([])
   const [fabricRows, setFabricRows] = useState([])
   const [consumptionMode, setConsumptionMode] = useState('AVG')
-  const [avgConsumption, setAvgConsumption] = useState(1.25)
+  const [avgConsumption, setAvgConsumption] = useState(1.4)
   const [sizeConsumptions, setSizeConsumptions] = useState({})
   const [sizeType, setSizeType] = useState('TIP1')
   const [groupingResults, setGroupingResults] = useState(null)

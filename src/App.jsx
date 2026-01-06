@@ -187,145 +187,106 @@ function App() {
 
           const totalColorDemand = colorSizes.reduce((sum, s) => sum + colorDemand[s], 0)
 
-          // Generate candidates for THIS COLOR only
-          const candidates = []
-          const sizeGroups = generateSizeGroups(colorSizes)
+          // ========== TOP-DOWN LAYER SEARCH ALGORITHM ==========
+          // Goal: Find the best cut (highest layers * most sizes)
+          // Method: For each layer count from 80 down, check 4/3/2/1 size combinations
 
-          const maxDemand = Math.max(...colorSizes.map(s => colorDemand[s]))
-          const BIG_DEMAND_THRESHOLD = maxDemand * 0.35
+          let best = null
 
-          sizeGroups.forEach(group => {
-            const ratio = {}
-            group.forEach(s => ratio[s] = (ratio[s] || 0) + 1)
-
-            let markerLen = 0
-            Object.entries(ratio).forEach(([s, r]) => {
-              const cons = (consumptionMode === 'SIZE' ? parseFloat(sizeConsumptions[s]) : 0) || avgConsumption
-              markerLen += (cons * r)
-            })
-            if (markerLen === 0) return
-
-            // Max layers from demand
-            let maxLayersDemand = Infinity
-            Object.entries(ratio).forEach(([s, r]) => {
-              maxLayersDemand = Math.min(maxLayersDemand, Math.floor((colorDemand[s] || 0) / r))
-            })
-            if (maxLayersDemand === 0) return
-
-            // Max layers from fabric
-            const maxLayersFabric = Math.floor(lotMetraj / markerLen)
-
-            const targetLayers = Math.min(HARD_CAP, maxLayersDemand, maxLayersFabric)
-            if (targetLayers <= 0) return
-
-            const piecesPerLayer = group.length
-            const totalPieces = piecesPerLayer * targetLayers
-
-            // AGGRESSIVE MINIMUM LAYER FILTER
-            // Main Phase: If we have substantial demand (>100 pcs), reject cuts under 15 layers
-            // This prevents 2-3 layer garbage cuts
-            if (totalColorDemand > 100 && targetLayers < 15) return
-
-            // Also reject if a SIZE is limiting us to low layers while others could go deeper
-            // Find which size is the bottleneck
-            let limitingSize = null
-            let limitingLayers = Infinity
-            Object.entries(ratio).forEach(([s, r]) => {
-              const maxForThis = Math.floor((colorDemand[s] || 0) / r)
-              if (maxForThis < limitingLayers) {
-                limitingLayers = maxForThis
-                limitingSize = s
-              }
-            })
-
-            // If a small-demand size is limiting us to <20 layers, skip this combination
-            // Let deeper cuts happen without this size, then clean it up later
-            if (limitingLayers < 20 && Object.keys(ratio).length > 1) {
-              const limitingSizeDemand = colorDemand[limitingSize] || 0
-              const avgDemand = totalColorDemand / colorSizes.length
-              // If limiting size has much less demand than average, reject
-              if (limitingSizeDemand < avgDemand * 0.5) return
+          // Helper: Check if a size combination can support N layers
+          const canSupportLayers = (sizes, targetLayers) => {
+            for (const s of sizes) {
+              if ((colorDemand[s] || 0) < targetLayers) return false
             }
-
-            candidates.push({
-              group, ratio, markerLen, targetLayers, totalPieces
-            })
-          })
-
-          if (candidates.length === 0) break
-
-          // SELECTION: Prioritize deep cuts
-          const priorityCandidates = candidates.filter(c => c.targetLayers >= HARD_CAP)
-          const deepSingleCandidates = candidates.filter(c =>
-            Object.keys(c.ratio).length === 1 && c.targetLayers >= DEEP_CUT_THRESHOLD
-          )
-
-          let finalCandidates = candidates
-          let selectionReason = 'Standard'
-
-          if (priorityCandidates.length > 0) {
-            finalCandidates = priorityCandidates
-            selectionReason = 'Priority (80L)'
-          } else if (deepSingleCandidates.length > 0) {
-            finalCandidates = deepSingleCandidates
-            selectionReason = 'Deep Single Lock'
+            return true
           }
 
-          // SCORING - WITH COMBINATION PRIORITY
-          let best = null
-          let maxScore = -Infinity
-
-          finalCandidates.forEach(cand => {
-            const currentCutsEst = Math.ceil(totalColorDemand / IDEAL_PIECES_PER_CUT)
-
-            let remainingAfter = 0
-            Object.entries(colorDemand).forEach(([s, qty]) => {
-              const used = (cand.ratio[s] || 0) * cand.targetLayers
-              remainingAfter += Math.max(0, qty - used)
+          // Helper: Calculate marker length for a combination
+          const calcMarkerLen = (sizes) => {
+            let len = 0
+            sizes.forEach(s => {
+              const cons = (consumptionMode === 'SIZE' ? parseFloat(sizeConsumptions[s]) : 0) || avgConsumption
+              len += cons
             })
-            const futureCutsEst = Math.ceil(remainingAfter / IDEAL_PIECES_PER_CUT)
-            const cutsSaved = currentCutsEst - futureCutsEst
+            return len
+          }
 
-            const layerRatio = cand.targetLayers / HARD_CAP
-            const depthScore = Math.pow(layerRatio, 2) * 15000 // MASSIVE reward for deep cuts
-
-            // Penalty for shallow cuts - this overrides combination benefit
-            let shallowPenalty = 0
-            if (cand.targetLayers < 20) shallowPenalty = 20000 // Almost never accept
-            else if (cand.targetLayers < 30) shallowPenalty = 10000
-            else if (cand.targetLayers < 40) shallowPenalty = 5000
-
-            let fragmentPenalty = 0
-            Object.entries(cand.ratio).forEach(([s, r]) => {
-              const remaining = (colorDemand[s] || 0) - (cand.targetLayers * r)
-              if (remaining > 0 && remaining < 20) fragmentPenalty += 2000
-            })
-
-            // REDUCED: Combination bonus - still prefer more sizes but not at cost of depth
-            const uniqueSizeCount = Object.keys(cand.ratio).length
-            const combinationBonus = uniqueSizeCount * 2000 // Reduced from 8000
-
-            // Completion bonus
-            let completionBonus = 0
-            Object.entries(cand.ratio).forEach(([s, r]) => {
-              const remaining = (colorDemand[s] || 0) - (cand.targetLayers * r)
-              if (remaining === 0) completionBonus += 1500
-            })
-
-            // DEPTH IS KING
-            const score = (cutsSaved * 8000)
-              + depthScore                    // HUGE weight on depth
-              + combinationBonus              // Reduced weight
-              + completionBonus
-              + (cand.totalPieces * 0.3)
-              - shallowPenalty                // MASSIVE penalty for shallow
-              - fragmentPenalty
-
-            if (score > maxScore) {
-              maxScore = score
-              best = { ...cand, score, selectionReason }
+          // Helper: Generate all N-size combinations from available sizes
+          const getCombinations = (arr, n) => {
+            if (n === 1) return arr.map(x => [x])
+            if (n > arr.length) return []
+            const result = []
+            for (let i = 0; i <= arr.length - n; i++) {
+              const head = arr[i]
+              const tailCombos = getCombinations(arr.slice(i + 1), n - 1)
+              tailCombos.forEach(combo => result.push([head, ...combo]))
             }
-          })
+            return result
+          }
+
+          // Sort sizes by demand (highest first) for better combinations
+          const sortedSizes = [...colorSizes].sort((a, b) =>
+            (colorDemand[b] || 0) - (colorDemand[a] || 0)
+          )
+
+          // TOP-DOWN SEARCH: Start from 80 layers, work down
+          outerLoop:
+          for (let targetLayers = HARD_CAP; targetLayers >= 1; targetLayers--) {
+            // For each layer count, try 4 sizes, then 3, then 2, then 1
+            for (let sizeCount = Math.min(4, sortedSizes.length); sizeCount >= 1; sizeCount--) {
+              const combos = getCombinations(sortedSizes, sizeCount)
+
+              for (const combo of combos) {
+                // Check if this combo can support targetLayers
+                if (!canSupportLayers(combo, targetLayers)) continue
+
+                // Check if fabric can support it
+                const markerLen = calcMarkerLen(combo)
+                if (markerLen === 0) continue
+                const maxLayersFabric = Math.floor(lotMetraj / markerLen)
+                if (maxLayersFabric < targetLayers) continue
+
+                // Found a valid combination!
+                const ratio = {}
+                combo.forEach(s => ratio[s] = 1)
+                const totalPieces = combo.length * targetLayers
+
+                best = {
+                  group: combo,
+                  ratio,
+                  markerLen,
+                  targetLayers,
+                  totalPieces,
+                  selectionReason: `${sizeCount}x @ ${targetLayers}L`
+                }
+                break outerLoop // Exit all loops - we found the best
+              }
+            }
+          }
+
+          // If no valid cut found with normal search, allow 1-layer cleanup
+          if (!best && totalColorDemand > 0 && lotMetraj > 0) {
+            // Cleanup: Just take whatever we can
+            for (const s of sortedSizes) {
+              const demand = colorDemand[s] || 0
+              if (demand > 0) {
+                const cons = (consumptionMode === 'SIZE' ? parseFloat(sizeConsumptions[s]) : 0) || avgConsumption
+                const maxFabric = Math.floor(lotMetraj / cons)
+                const layers = Math.min(demand, maxFabric, HARD_CAP)
+                if (layers > 0) {
+                  best = {
+                    group: [s],
+                    ratio: { [s]: 1 },
+                    markerLen: cons,
+                    targetLayers: layers,
+                    totalPieces: layers,
+                    selectionReason: 'Cleanup'
+                  }
+                  break
+                }
+              }
+            }
+          }
 
           if (!best) break
 

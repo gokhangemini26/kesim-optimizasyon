@@ -216,11 +216,15 @@ function App() {
 
           // 3. CONSTRAINTS & FILTERS (The 6-Point Strategy)
 
-          // Constraint 5: MIN YIELD FILTER
+          // Constraint 5: MIN YIELD FILTER (Stricter)
           const piecesPerLayer = group.length
           const totalPieces = piecesPerLayer * targetLayers
-          // If we have plenty of work (>200 pcs), don't accept tiny cuts (<40 pcs)
-          if (totalRemainingQty > 200 && totalPieces < 40) return
+          // Stricter filtering for main phase:
+          // If totalRemaining > 200, reject cuts with < 100 pieces OR < 25 layers (unless 80+ layers achieved)
+          if (totalRemainingQty > 200) {
+            if (totalPieces < 100) return
+            if (targetLayers < 30 && targetLayers < HARD_CAP) return
+          }
 
           // Constraint 3: SMALL SIZE PROTECTION
           let isLimitedByFill = false
@@ -232,7 +236,8 @@ function App() {
               coreInGroup.forEach(s => {
                 maxCoreLayers = Math.min(maxCoreLayers, Math.floor(globalDemand[s] / (ratio[s] || 1)))
               })
-              if (maxCoreLayers > targetLayers + 20) isLimitedByFill = true
+              // If core size can go much deeper alone (+25 layers), reject this mixed cut
+              if (maxCoreLayers > targetLayers + 25) isLimitedByFill = true
             }
           }
           if (isLimitedByFill) return // Reject
@@ -282,17 +287,28 @@ function App() {
 
           const cutsSaved = currentCutsEst - futureCutsEst
 
-          // Constraint 6: LOOK-AHEAD
+          // SCORE - REFINED FOR CUT MINIMIZATION
+          // Primary: CutsSaved (Huge weight)
+          // Secondary: Layer Depth Ratio (We want DEEP cuts, not just many pieces)
+          // Penalty: Shallow cuts (< 40 layers) get massive penalty in comparison
+
+          const layerRatio = cand.targetLayers / HARD_CAP // 0.0 to 1.0
+          const depthScore = Math.pow(layerRatio, 3) * 5000 // Exponential reward for max depth
+
+          // Massive penalty for cuts < 40 layers if we have other options
+          const shallowPenalty = (cand.targetLayers < 40) ? 5000 : 0
+
+          // Constraint 6: LOOK-AHEAD (Fragment Penalty)
           let fragmentPenalty = 0
           Object.entries(cand.ratio).forEach(([s, r]) => {
             const remaining = (globalDemand[s] || 0) - (cand.targetLayers * r)
-            if (remaining > 0 && remaining < 15) fragmentPenalty += 2000
+            if (remaining > 0 && remaining < 20) fragmentPenalty += 2000
           })
 
-          // Final Score Formula
-          const score = (cutsSaved * 3000)
-            + (cand.totalPieces * 1.0)
-            + (cand.targetLayers * 10.0)
+          const score = (cutsSaved * 10000)      // Highest Priority
+            + depthScore               // Reward 80 layers significantly
+            + (cand.totalPieces * 0.5) // Minor tie-breaker
+            - shallowPenalty           // Avoid 20-30 layer cuts if possible
             - fragmentPenalty
 
           if (score > maxScore) {

@@ -252,6 +252,10 @@ function App() {
 
       if (!globalBest) break // No more single-color cuts possible
 
+      // PHASE 1 MINIMUM: Don't do single-color cuts under 10 layers
+      // Let Phase 2 (multi-color) handle small remainders more efficiently
+      if (globalBest.targetLayers < 10) break
+
       // EXECUTE the best cut
       const { color, lot, group, ratio, markerLen, targetLayers, totalPieces } = globalBest
 

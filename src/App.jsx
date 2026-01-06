@@ -202,128 +202,204 @@ function App() {
     let cutNo = 1
     const remainingDemands = JSON.parse(JSON.stringify(colorDemands))
 
-    // ✅ 4. RENK BAZLI OPTİMİZASYON (Greedy - En Verimli Kesim)
+    // ✅ 4. SCORING ENGINE OPTIMİZASYONU (Gelişmiş Algoritma)
     const sortedColors = Object.keys(colorDemands)
 
     sortedColors.forEach(color => {
-      // Renk bedenlerini sırala
+      // Renk bedenlerini sırala (Küçükten büyüğe)
+      // Bu sıralama kombinasyon üretirken önemli
       const colorSizes = Object.keys(colorDemands[color]).sort((a, b) =>
         String(a).localeCompare(String(b), undefined, { numeric: true })
       )
 
-      // Bir rengi tamamen bitirene kadar döngü
       let loopSafety = 0
       while (loopSafety++ < 500) {
-        // Hala talep var mı?
-        const remainingQty = Object.values(remainingDemands[color]).reduce((a, b) => a + b, 0)
-        if (remainingQty <= 0) break
-
-        // ✅ 5. EN BÜYÜK KUMAŞ GRUBUNU BUL (Optimizasyon: Büyük toplarla büyük işleri bitir)
-        // Sadece içinde kumaş kalan lotları filtrele
+        // 1. Kumaş Kontrolü
         const viableGroups = allFabricGroups.filter(g => g.totalMetraj > 0)
+        if (viableGroups.length === 0) break
 
-        if (viableGroups.length === 0) {
-          console.warn(`${color} için kumaş kalmadı!`)
-          break // Kumaş bitti
-        }
-
-        // En büyük metrajlı grubu seç (Zaten sıralı geliyordu ama garanti olsun)
+        // En büyük grubu seç
         viableGroups.sort((a, b) => b.totalMetraj - a.totalMetraj)
         const currentGroup = viableGroups[0]
 
-        // ✅ 6. EN ÇOK İSTENEN BEDENLERİ SEÇ (Max 4 çeşit)
-        // Talebi en yüksek olan bedenleri bul
-        const sizesWithDemand = colorSizes
-          .filter(s => remainingDemands[color][s] > 0)
-          .sort((a, b) => remainingDemands[color][b] - remainingDemands[color][a]) // Çoktan aza
-          .slice(0, 4) // En çok istenen ilk 4 beden
+        // 2. Talep Kontrolü
+        const currentDemands = remainingDemands[color]
+        const totalRemaining = Object.values(currentDemands).reduce((a, b) => a + b, 0)
+        if (totalRemaining <= 0) break
 
-        if (sizesWithDemand.length === 0) break // Talep bitti
+        // 3. ADAY KOMBİNASYONLARIN OLUŞTURULMASI (Candidate Generation)
+        // Sadece talebi olan bedenleri al
+        const activeSizes = colorSizes.filter(s => currentDemands[s] > 0)
+        if (activeSizes.length === 0) break
 
-        // ✅ 7. ORAN (RATIO) BELİRLE VE OPTİMUM PLANI BUL
-        // Strateji: Öyle bir ratio ve kat sayısı bul ki, tek seferde EN ÇOK adedi keselim.
-        // Denenecek basit ratiolar (Makine öğrenmesi yerine sezgisel tarama)
-        let bestPlan = null
-        let maxPieces = 0
-
-        // Temel ratio kombinasyonları (En çok istenen bedene ağırlık ver)
-        const targetSize = sizesWithDemand[0]
         const candidates = []
 
-        // 1. Düz mantık: Her bedenden 1 tane
-        candidates.push(sizesWithDemand.reduce((acc, s) => ({ ...acc, [s]: 1 }), {}))
+        // A. TEKLİ (SAME) - [S], [M]
+        activeSizes.forEach(s => candidates.push([s]))
 
-        // 2. Ağırlıklı mantık: En çok istenenden 2, diğerlerinden 1
-        if (remainingDemands[color][targetSize] > 50) {
-          candidates.push(sizesWithDemand.reduce((acc, s) => ({ ...acc, [s]: s === targetSize ? 2 : 1 }), {}))
+        // B. İKİLİ (PAIR) - [S, M], [S, S]
+        for (let i = 0; i < activeSizes.length; i++) {
+          for (let j = i; j < activeSizes.length; j++) {
+            candidates.push([activeSizes[i], activeSizes[j]])
+          }
         }
 
-        // 3. Çok ağırlıklı: En çok istenenden 3 veya 4 (Eğer diğerlerinden çok fazlaysa)
-        if (remainingDemands[color][targetSize] > 100) {
-          candidates.push(sizesWithDemand.reduce((acc, s) => ({ ...acc, [s]: s === targetSize ? 3 : 1 }), {}))
+        // C. ÜÇLÜ (TRIPLE) - [S, M, L]
+        // Performans için sadece talep yüksekse 3'lü kombinasyonlara gir
+        if (totalRemaining > 100) {
+          for (let i = 0; i < activeSizes.length; i++) {
+            for (let j = i; j < activeSizes.length; j++) {
+              for (let k = j; k < activeSizes.length; k++) {
+                candidates.push([activeSizes[i], activeSizes[j], activeSizes[k]])
+              }
+            }
+          }
         }
 
-        candidates.forEach(ratio => {
+        // D. DÖRTLÜ (QUAD) - [S, M, L, XL]
+        // Sadece çok yüksek talep varsa ve en az 3 farklı beden içeriyorsa
+        if (totalRemaining > 300) {
+          // Basitleştirilmiş: Sadece en çok istenen 4 bedenin kombinasyonunu al
+          // Tüm kombinasyonları denemek çok pahalı olur
+          const topSizes = activeSizes.sort((a, b) => currentDemands[b] - currentDemands[a]).slice(0, 4)
+          if (topSizes.length >= 2) {
+            candidates.push([...topSizes].slice(0, 4)) // En çok istenen 4'ü
+          }
+        }
+
+        // 4. SKORLAMA (SCORING)
+        let bestCandidate = null
+        let bestScore = -Infinity
+
+        candidates.forEach(candidateSizes => {
+          // REÇETE SEÇİMİ (Recipe Selection)
+          let ratio = {}
+          let type = ''
+
+          const uniqueSizes = [...new Set(candidateSizes)]
+          const sizeCount = uniqueSizes.length
+
+          if (sizeCount === 1) {
+            // Same size -> 4x (Tek bedenden 4 tane, veya 1 tane * 4 kat gibi düşünülür ama markerde 4 adet olması fireyi azaltır)
+            // Ancak basitlik için: Her bedenden 1 tane koyup katı artırmak daha kolaydır.
+            // Fakat "Pattern Recipe" kuralına göre:
+            // Marker'da o bedenden kaç kopya olacağı.
+            ratio = { [candidateSizes[0]]: 4 }
+            type = 'SAME (4x)'
+          } else if (sizeCount === 2) {
+            // 2 Beden -> 2+2
+            ratio = { [uniqueSizes[0]]: 2, [uniqueSizes[1]]: 2 }
+            type = 'PAIR (2+2)'
+          } else if (sizeCount === 3) {
+            // 3 Beden -> 1+1+1 (Belki en çok istenenden +1 eklenebilir ama standart 1-1-1)
+            // Kullanıcı isteği: Mixed 2+1+1 (En çok istenenden 2)
+            // En çok talep edilen hangisi?
+            const maxDemandSize = uniqueSizes.sort((a, b) => currentDemands[b] - currentDemands[a])[0]
+            ratio = {}
+            uniqueSizes.forEach(s => ratio[s] = (s === maxDemandSize ? 2 : 1))
+            type = 'TRIPLE (2+1+1)'
+          } else {
+            // 4 Beden -> 1+1+1+1
+            ratio = {}
+            candidateSizes.forEach(s => ratio[s] = 1)
+            type = 'QUAD (1x4)'
+          }
+
+          // HESAPLAMALAR
           let currentLength = 0
-          Object.entries(ratio).forEach(([s, r]) => currentLength += getConsumption(s) * r)
+          let totalPiecesPerLayer = 0
+          Object.entries(ratio).forEach(([s, r]) => {
+            currentLength += getConsumption(s) * r
+            totalPiecesPerLayer += r
+          })
 
-          // Kısıtlar
+          if (currentLength === 0) return
+
           const maxLayersFabric = Math.floor(currentGroup.totalMetraj / currentLength)
 
           let maxLayersDemand = Infinity
           Object.entries(ratio).forEach(([s, r]) => {
-            const d = remainingDemands[color][s] || 0
-            maxLayersDemand = Math.min(maxLayersDemand, Math.floor(d / r)) // Tam kat kesebiliyor muyuz?
+            const d = currentDemands[s] || 0
+            maxLayersDemand = Math.min(maxLayersDemand, Math.floor(d / r))
+          })
+          if (maxLayersDemand === 0) maxLayersDemand = 1 // Zorla
+
+          // KAT YÖNETİMİ (Soft Cap)
+          // İdeal: 40-65 arası. Max: 80
+          // Eğer optimum 50 ise ve biz 80 yapabiliyorsak, 80 yapmak yerine 65'te kesmek daha iyi olabilir (kalite için)
+          // Ama işi bitirmek için 80'e çıkmaya izin verilir.
+          const SOFT_CAP = 65
+          const HARD_CAP = 80
+
+          let targetLayers = Math.min(HARD_CAP, maxLayersFabric, maxLayersDemand)
+
+          // Eğre talep çoksa ve fabric yetiyorsa Soft Cap uygula
+          // Sadece çok küçük parçalar kalmasın diye kontrol et
+          if (targetLayers > SOFT_CAP) {
+            // Eğer 65 yaptığımda kalan parça çok küçük (örn 5 katlık) olacaksa, hepsini 80'de bitirmek daha iyidir.
+            // Ama 120 katlık iş varsa 60+60 bölmek iyidir.
+            // Şimdilik basit soft cap:
+            if (maxLayersDemand > 100) targetLayers = SOFT_CAP
+          }
+
+          if (targetLayers <= 0) return
+
+          // SKOR FORMÜLÜ
+          // 1. Demand Weight: Ne kadar çok iş eritiyoruz?
+          const totalPieces = totalPiecesPerLayer * targetLayers
+          const demandScore = totalPieces
+
+          // 2. Balance Score: Farklı bedenleri karıştırmak genelde iyidir (pastal verimi)
+          const balanceScore = sizeCount * 200 // Her çeşit için +200 puan
+
+          // 3. Risk Penalty (LOOK AHEAD)
+          // Bu kesimi yaparsak geriye ne kalıyor?
+          // "Problemli Beden" = Az kalan (örn 10'dan az) ve tek başına kalan.
+          let riskPenalty = 0
+          Object.entries(ratio).forEach(([s, r]) => {
+            const remaining = (currentDemands[s] || 0) - (targetLayers * r)
+            if (remaining > 0 && remaining < 10) {
+              riskPenalty += 500 // Tehlikeli bölge
+            }
+            if (remaining < 0) { // Fazla kesim (bunu engellemiyoruz ama ceza verelim)
+              riskPenalty += Math.abs(remaining) * 50 // Gereksiz fazla kesim cezası
+            }
           })
 
-          // Eğer talep çok az kalmışsa (floor 0 veriyorsa) bir üst kata tamamla (artık kumaş kısıtı izin verirse)
-          if (maxLayersDemand === 0) maxLayersDemand = 1
+          const finalScore = (demandScore * 1.0) + (balanceScore) - (riskPenalty)
 
-          // Nihai Kat Sayısı (80 ile sınırla)
-          // Öncelik: Kumaş yettiği sürece max 80 kat at. Talep fazlası olması önemli değil (%5 kuralı zaten var, fazlası stoğa)
-          // Fakta kullanıcının talebi "En fazla kesim adedine ulaş".
-          // Bu yüzden talebi tam karşılayacak kadar değil, 80 kata kadar ne varsa kesebiliriz.
-          // AMA DİKKAT: Talepten çok fazla kesmek istemeyiz. Sadece biraz fazla olabilir.
-          // Strateji: Talebi karşılayan kat sayısı (maxLayersDemand) ile 80 arasında denge kur.
-
-          const possibleLayers = Math.min(80, maxLayersFabric, Math.max(1, Math.ceil(maxLayersDemand)))
-
-          if (possibleLayers > 0) {
-            const totalPieces = Object.values(ratio).reduce((a, b) => a + b, 0) * possibleLayers
-            if (totalPieces > maxPieces) {
-              maxPieces = totalPieces
-              bestPlan = {
-                ratio,
-                layers: possibleLayers,
-                length: currentLength
-              }
+          if (finalScore > bestScore) {
+            bestScore = finalScore
+            bestCandidate = {
+              ratio,
+              layers: targetLayers,
+              length: currentLength,
+              type,
+              pieces: totalPieces,
+              score: finalScore
             }
           }
         })
 
-        if (!bestPlan) {
-          // Hiçbir plan uymadı (Kumaş yetmiyor veya başka sorun), bu grubu pas geçip döngüye devam etmesi için yapay olarak metrajı 0 varsayalım (bu döngülük)
+        if (!bestCandidate) {
+          // Uygun aday yoksa bu grubu geç
           currentGroup.totalMetraj = 0
           continue
         }
 
-        // ✅ 8. PLANI UYGULA VE KAYDET
-        const { ratio, layers, length } = bestPlan
+        // EN İYİ PLANI UYGULA
+        const { ratio, layers, length, type } = bestCandidate
 
-        // Üretilen adetleri hesapla
         const producedQuantities = {}
         Object.entries(ratio).forEach(([size, r]) => {
           const qty = layers * r
           producedQuantities[size] = qty
-          // Talebi düş
           remainingDemands[color][size] = Math.max(0, remainingDemands[color][size] - qty)
         })
 
-        // Kumaşı düş
         const usedMetraj = layers * length
         currentGroup.totalMetraj -= usedMetraj
 
-        // Kaydet
         plans.push({
           id: cutNo++,
           shrinkage: `${currentGroup.mold} | LOT: ${currentGroup.lot}`,
@@ -339,16 +415,14 @@ function App() {
           }],
           fabrics: currentGroup.fabrics.map(f => f.topNo).join(', '),
           usedMetraj: usedMetraj.toFixed(2),
-          availableMetraj: (currentGroup.totalMetraj + usedMetraj).toFixed(2), // Eski hali
-          remainingMetraj: currentGroup.totalMetraj.toFixed(2)
+          availableMetraj: (currentGroup.totalMetraj + usedMetraj).toFixed(2),
+          remainingMetraj: currentGroup.totalMetraj.toFixed(2),
+          note: `${type} - Skor: ${Math.floor(bestCandidate.score)}`
         })
       }
     })
 
-    // Eksik kalan, çok renkli vs. durumlar için şu anlık basit fallback gerekmiyor çünkü 
-    // yukarıdaki döngü kumaş ve talep bitene kadar zorluyor.
-
-    console.log('✅ Oluşturulan Planlar:', plans)
+    console.log('✅ Scoring Engine Sonuçları:', plans)
 
     // ✅ 12. ÖZET RAPOR OLUŞTUR
     const allSizesSet = new Set()

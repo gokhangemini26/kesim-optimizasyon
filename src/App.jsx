@@ -245,26 +245,24 @@ function App() {
         }
 
         // C. ÜÇLÜ (TRIPLE) - [S, M, L]
-        // Performans için sadece talep yüksekse 3'lü kombinasyonlara gir
-        if (totalRemaining > 100) {
-          for (let i = 0; i < activeSizes.length; i++) {
-            for (let j = i; j < activeSizes.length; j++) {
-              for (let k = j; k < activeSizes.length; k++) {
-                candidates.push([activeSizes[i], activeSizes[j], activeSizes[k]])
-              }
+        // Tüm olası 3'lü kombinasyonları ekle
+        for (let i = 0; i < activeSizes.length; i++) {
+          for (let j = i; j < activeSizes.length; j++) {
+            for (let k = j; k < activeSizes.length; k++) {
+              candidates.push([activeSizes[i], activeSizes[j], activeSizes[k]])
             }
           }
         }
 
         // D. DÖRTLÜ (QUAD) - [S, M, L, XL]
-        // Sadece çok yüksek talep varsa ve en az 3 farklı beden içeriyorsa
-        if (totalRemaining > 300) {
-          // Basitleştirilmiş: Sadece en çok istenen 4 bedenin kombinasyonunu al
-          // Tüm kombinasyonları denemek çok pahalı olur
+        // En çok talep edilen 4 bedenin kombinasyonu
+        if (activeSizes.length >= 4) {
           const topSizes = activeSizes.sort((a, b) => currentDemands[b] - currentDemands[a]).slice(0, 4)
-          if (topSizes.length >= 2) {
-            candidates.push([...topSizes].slice(0, 4)) // En çok istenen 4'ü
-          }
+          candidates.push([...topSizes])
+        }
+        // Ayrıca manuel olarak ilk 4'lü kombinasyonu da ekleyelim (sıralı gelen)
+        if (activeSizes.length >= 4) {
+          candidates.push(activeSizes.slice(0, 4))
         }
 
         // 4. SKORLAMA (SCORING)

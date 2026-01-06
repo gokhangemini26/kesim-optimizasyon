@@ -1,7 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Any, Union
-from ortools.sat.python import cp_model
 from fastapi.middleware.cors import CORSMiddleware
 import math
 import re
@@ -33,11 +32,11 @@ class FabricRaw(BaseModel):
 
 class OptimizationRequest(BaseModel):
     orderRows: List[OrderRow]
-    fabrics: List[FabricRaw] # Raw list from frontend
+    fabrics: List[FabricRaw]
     avgConsumption: float
 
 class CutPlanRow(BaseModel):
-    colors: str # "Red+Blue", usually single color per requirement
+    colors: str
     layers: int
     quantities: Dict[str, int]
 
@@ -48,276 +47,263 @@ class CutPlan(BaseModel):
     lot: str = ""
     mold: str = "Smart Group"
     used_rolls: List[str]
-    fabrics: str = "" # legacy string support
+    fabrics: str = ""
     cut_summary: List[str]
     totalLayers: int
     efficiency: float
     markerRatio: Dict[str, int] = {}
     rows: List[CutPlanRow]
 
-# --- Logic Helper ---
-
+# --- Parsing Helper ---
 def parse_shrinkage(code: str):
-    """Parses 'E55 B45' -> En: 5.5, Boy: 4.5"""
     code = code.upper().replace(" ", "")
     en_match = re.search(r'E(\d+\.?\d*)', code)
     boy_match = re.search(r'B(\d+\.?\d*)', code)
-    
     en_val = float(en_match.group(1)) if en_match else 0.0
     boy_val = float(boy_match.group(1)) if boy_match else 0.0
-    
-    # User might input 55 for 5.5% or 5.5 directly. 
-    # Usually in textile E55 means 5.5%. E5 means 5%? Or 0.5?
-    # Context suggests "E55" -> 5.5%. "E5" -> 5.0%? 
-    # Let's assume input matches exactly what is written on roll.
-    # Grouping logic depends on delta.
-    
-    return en_val, boy_val
+    # Return single float for sorting? User logic sorts by "shrinkage".
+    # Let's return a tuple or sum for strict ordering?
+    # User says: "sorted by shrinkage". E55 B45 vs E50 B50?
+    return en_val + boy_val # Simple sum for now? Or tuple.
 
-def are_shrinkages_compatible(s1, s2, tol_en=1.0, tol_boy=1.0):
-    e1, b1 = parse_shrinkage(s1)
-    e2, b2 = parse_shrinkage(s2)
-    return abs(e1 - e2) <= tol_en and abs(b1 - b2) <= tol_boy
+# --- USER ALGORITHM IMPLEMENTATION ---
 
-# --- Optimization Endpoint ---
+class FabricLot:
+    def __init__(self, lot_id, shrinkage, shrinkage_code, rolls):
+        self.lot_id = lot_id
+        self.shrinkage = shrinkage # float sort key
+        self.shrinkage_code = shrinkage_code
+        self.rolls = rolls # List[FabricRaw]
+        self.total_metraj = sum(r.metraj for r in rolls)
+        self.used_metraj = 0.0
+
+    @property
+    def remaining_metraj(self):
+        return self.total_metraj - self.used_metraj
+
+def generate_size_groups(sizes):
+    """
+    Max 4 sizes.
+    - Same size repeats
+    - Small + Large matches
+    """
+    groups = []
+    
+    # 1. Single size repeats (2 to 4)
+    for s in sizes:
+        for count in range(2, 5):
+             groups.append([s] * count)
+
+    # 2. Small + Large matches
+    # We need to determine "Small" and "Large" from the Current Available Sizes
+    # Dynamic classification?
+    # Sort sizes based on numerical value
+    sorted_sizes = sorted(sizes, key=lambda x: str(x)) # e.g. 28/32 sort as string or number? usually string works for fixed length, else custom
+    # Let's assume standard textile sizes, numeric sort is safer if convertable
+    def size_val(s):
+        try:
+             # Handle 28/32 -> 28. 2XS -> ?
+            parts = str(s).split('/')
+            return int(parts[0]) if parts[0].isdigit() else 0
+        except:
+             return 0
+             
+    sorted_sizes = sorted(sizes, key=size_val)
+    
+    if len(sorted_sizes) >= 2:
+        small = sorted_sizes[:2]
+        large = sorted_sizes[-2:]
+        
+        # Combinations
+        for s in small:
+            for l in large:
+                groups.append([s, s, l, l]) # 2 small 2 large
+                groups.append([s, l])       # 1 small 1 large
+                groups.append([s, s, l])    # 2 small 1 large
+                groups.append([s, l, l])    # 1 small 2 large
+
+    return groups
+
+def valid_pastal(size_group):
+    # Rule: Max 4 sizes
+    if len(size_group) > 4: return False
+    
+    unique = list(set(size_group))
+    if len(unique) == 1: return True # All same OK
+    
+    # Check Small/Large balance
+    def size_val(s):
+        try:
+            parts = str(s).split('/')
+            return int(parts[0]) if parts[0].isdigit() else 0
+        except: return 0
+
+    vals = sorted([size_val(s) for s in unique])
+    # Heuristic: If we have mixed sizes, range should be wide?
+    # User rule: "En kucuk 2 + En buyuk 2"
+    # This check is hard to enforce strictly on a generic group without global context.
+    # But generate_size_groups ALREADY generated only valid candidates (Small+Large).
+    # So we mainly trust generation.
+    return True
+
+def calculate_layers_and_consumption(size_group, size_demand, lot, avg_consumption):
+    """
+    Returns (layers, used_meters, valid)
+    """
+    MAX_LAYERS = 80
+    
+    # Marker Length Calculation (Est)
+    marker_len = avg_consumption * len(size_group)
+    
+    # 1. Max layers allowed by LOT METRAJ
+    if marker_len <= 0: return 0, 0, False
+    
+    max_from_lot = math.floor(lot.remaining_metraj / marker_len)
+    
+    # 2. Max layers allowed by DEMAND
+    max_from_demand = MAX_LAYERS
+    counts = collections.Counter(size_group)
+    
+    for s, count in counts.items():
+        if size_demand[s] <= 0: return 0, 0, False
+        allowed = size_demand[s] // count
+        max_from_demand = min(max_from_demand, allowed)
+        
+    final_layers = min(max_from_lot, max_from_demand)
+    
+    if final_layers <= 0: return 0, 0, False
+    
+    return final_layers, final_layers * marker_len, True
 
 @app.post("/optimize", response_model=List[CutPlan])
-def optimize_cutting_cp_sat(data: OptimizationRequest):
-    print(f"Received Request: {len(data.orderRows)} orders, {len(data.fabrics)} fabrics")
+def optimize_cutting_custom(data: OptimizationRequest):
+    print(f"Starting Custom Optimization: {len(data.orderRows)} orders")
     
-    # 1. Parsing & Smart Grouping
-    # Group by Lot -> Then Cluster by Shrinkage
-    lots = collections.defaultdict(list)
-    for f in data.fabrics:
-        lots[f.lot].append(f)
-        
-    fabric_groups = [] # List of { "name": "Lot X - E55 B45", "rolls": [f1, f2], "total_m": ... }
-    
-    for lot_name, rolls in lots.items():
-        # Cluster within lot
-        # Simple clustering: Pick pivot, find all compatible, remove, repeat
-        remaining_rolls = sorted(rolls, key=lambda x: x.metraj, reverse=True)
-        
-        while remaining_rolls:
-            pivot = remaining_rolls.pop(0)
-            cluster = [pivot]
-            others = []
-            
-            for r in remaining_rolls:
-                if are_shrinkages_compatible(pivot.shrinkageCode, r.shrinkageCode):
-                    cluster.append(r)
-                else:
-                    others.append(r)
-            
-            remaining_rolls = others
-            
-            # Create Group
-            total_m = sum(c.metraj for c in cluster)
-            fabric_groups.append({
-                "id": f"{lot_name}_{len(fabric_groups)}",
-                "name": f"Lot {lot_name} / {pivot.shrinkageCode}",
-                "rolls": cluster,
-                "total_metraj": total_m,
-                "used_metraj": 0.0
-            })
-            
-    # 2. Prepare Demand
-    # Flatten: (Color, Size) -> target_qty, min_qty, max_qty
-    demands = []
-    
+    # 1. Group Orders by Color
+    # logic: Plan per color sequentially
+    demands_by_color = collections.defaultdict(lambda: collections.defaultdict(int))
     for order in data.orderRows:
         for size, qty in order.quantities.items():
             if qty > 0:
-                demands.append({
-                    "color": order.color,
-                    "size": size,
-                    "target": qty,
-                    "min": qty,
-                    "max": math.ceil(qty * 1.05) # 5% Tolerance
-                })
+                demands_by_color[order.color][size] += qty
+                
+    # 2. Prepare Fabric Lots
+    # Group by Lot Number + Shrinkage Code
+    # Assuming fabrics with same Lot + Shrinkage are one "FabricLot" resource
+    grouped_fabrics = collections.defaultdict(list)
+    for f in data.fabrics:
+        key = (f.lot, f.shrinkageCode)
+        grouped_fabrics[key].append(f)
+        
+    fabric_lots_objects = []
+    for (lot_id, shrink_code), rolls in grouped_fabrics.items():
+        sort_val = parse_shrinkage(shrink_code)
+        fabric_lots_objects.append(FabricLot(lot_id, sort_val, shrink_code, rolls))
+        
+    # Sort Lots by Shrinkage (User Rule 3)
+    fabric_lots_objects.sort(key=lambda x: x.shrinkage)
     
-    if not demands:
-        return []
-
-    # 3. CP-SAT Optimization Model
-    model = cp_model.CpModel()
-    
-    # Variables
-    # x[demand_idx, group_idx] = quantity allocated to this group
-    allocation = {} 
-    
-    # Track used metraj per group
-    # used_m[group_idx] approx = sum(x * avg_cons)
-    # We need to enforce group capacity.
-    
-    # Scaling consumption to integer (mm) for solver stability if needed, 
-    # but here quantities are integers. Metraj is float.
-    # We can treat capacity constraint as: sum(x) * avg_consumption <= total_metraj
+    plans = []
+    cut_id_counter = 1
     
     avg_cons = data.avgConsumption
     
-    score_vars = []
+    # Iterate Colors (Requirement: One Color -> One Lot ideally)
+    # We process colors one by one? 
+    # Or do we process Lots and fill them with whatever color?
+    # User Rule: "Bir renk ayni lottan kesilir... mumkunse karismaz"
+    # Strategy: For each color, pick best matching Lot(s).
+    # OR: Iterate Lots, and assign best fitting Color?
+    # User's pseudo code iterates Lots: "for lot in fabric_lots..."
+    # And "available_sizes = [s for s in size_demand...]"
+    # This implies the User's Logic mixes Colors in the loop? 
+    # NO, usually cutting plan is mono-color.
+    # We should run the user's "Greedy Strategy" PER COLOR.
     
-    for d_idx, d in enumerate(demands):
-        # We need to decide how many units of this demand come from which group
+    sorted_colors = sorted(demands_by_color.keys())
+    
+    for color in sorted_colors:
+        size_demand = demands_by_color[color] # Mutable dict
         
-        # Determine total var for this demand
-        total_qty_var = model.NewIntVar(d['min'], d['max'], f"total_qty_{d['color']}_{d['size']}")
+        # Filter Lots that match this color? 
+        # In this system, Fabric is generic (Raw Material). Color is dyed? 
+        # Or is Fabric ALREADY Colored?
+        # Usually Fabric Table has Lot/Shrinkage. Does it have Color?
+        # The Current `FabricRaw` model does NOT have Color.
+        # Implication: All fabrics are same base or Color is irrelevant (Denim washing?).
+        # Or we assume all uploaded fabric is for the currently processed Order.
+        # We proceed assuming All Lots are eligible for All Colors (or User manages this).
         
-        qty_from_groups = []
+        # We need to iterate Lots for this Color
+        # Note: If we use a Lot for Color A, we reduce its metraj.
         
-        # Soft preference: Try to serve a Color from a Single Lot/Group.
-        # This is hard. "One color -> One Lot".
-        # Let's create boolean vars: is_color_in_group[color, group]
-        
-        for g_idx, group in enumerate(fabric_groups):
-            # Qty of (Color, Size) assigned to Group
-            # Upper bound: demand max or group capacity
-            max_cap = int(group['total_metraj'] / avg_cons)
-            limit = min(d['max'], max_cap)
+        for lot in fabric_lots_objects:
+            if lot.remaining_metraj < 1: continue
             
-            # Create variable
-            x = model.NewIntVar(0, limit, f"x_{d_idx}_{g_idx}")
-            allocation[(d_idx, g_idx)] = x
-            qty_from_groups.append(x)
-            
-        # Constraint: Sum of allocations must match total_qty_var
-        model.Add(sum(qty_from_groups) == total_qty_var)
-        
-    # Capacity Constraints per Group
-    for g_idx, group in enumerate(fabric_groups):
-        # sum(x_d_g * avg_cons) <= total_metraj_g
-        # Convert to int inequality: sum(x_d_g) <= total_metraj / avg_cons
-        
-        max_units = int(group['total_metraj'] / avg_cons)
-        
-        # Sum of all demands allocated to this group
-        group_load_expr = sum(allocation[(d_idx, g_idx)] for d_idx in range(len(demands)))
-        model.Add(group_load_expr <= max_units)
-        
-        # Objective: Maximize Usage? Minimize Waste?
-        # We want to satisfy demand within tolerance (handled by bounds).
-        # We want to Minimize Split Lots (One color in many lots).
-        
-    # Single Lot per Color Preference (Soft)
-    # Map color -> list of groups used
-    all_colors = set(d['color'] for d in demands)
-    
-    penalties = []
-    
-    for color in all_colors:
-        # Get all demand indices for this color
-        d_indices = [i for i, d in enumerate(demands) if d['color'] == color]
-        
-        # For each group, is this color present?
-        groups_used_vars = []
-        for g_idx in range(len(fabric_groups)):
-            # is_present = 1 if sum(allocation for this color in this group) > 0
-            
-            qty_in_group = sum(allocation[(di, g_idx)] for di in d_indices)
-            is_present = model.NewBoolVar(f"color_{color}_in_g{g_idx}")
-            
-            # Link constraint: is_present <=> qty_in_group > 0
-            # If qty > 0 -> is_present = 1
-            # If qty = 0 -> is_present = 0
-            model.Add(qty_in_group > 0).OnlyEnforceIf(is_present)
-            model.Add(qty_in_group == 0).OnlyEnforceIf(is_present.Not())
-            
-            groups_used_vars.append(is_present)
-            
-        # Penalty for using > 1 group
-        # Number of groups used for this color
-        num_groups_used = model.NewIntVar(0, len(fabric_groups), f"num_groups_{color}")
-        model.Add(num_groups_used == sum(groups_used_vars))
-        
-        # We want num_groups_used to be 1 ideally.
-        # Penalty = (num_groups_used - 1) * 1000
-        # Since we minimize, we add num_groups_used to objective
-        penalties.append(num_groups_used)
-
-    # Objective
-    # 1. Minimize Number of "Split Colors" (primary)
-    # 2. Maximize Production (within tolerance) ? Usually we assume demands are set.
-    #    Actually we want to satisfy Min demand. The 5% is tolerance to FILL fabric if needed.
-    #    Let's add a small bonus for production to encourage using tolerance if it helps fit lots?
-    #    No, user usually prefers exact unless necessary.
-    
-    # Let's Minimize: 
-    # (Sum of Groups Used per Color * 1000)
-    # - (Sum of Total Qty * 1) -> To encourage producing closer to Max? No.
-    
-    model.Minimize(sum(penalties))
-    
-    solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = 10.0
-    status = solver.Solve(model)
-    
-    print(f"Solver Status: {solver.StatusName(status)}")
-    
-    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        print("Optimization failed to find feasible solution.")
-        return []
-        
-    # --- Format Check ---
-    # Create Plans based on Allocation
-    
-    plans = []
-    plan_id = 1
-    
-    for g_idx, group in enumerate(fabric_groups):
-        # Gather all items allocated to this group
-        group_items = []
-        total_layers_dummy = 0 # Layers is a bit abstract here because we allocated Quantity.
-        # We can derive "Virtual Layers" if we assume 1 layer = 1 unit? No.
-        # In Cut Plan: "Qty" is what matters. Layers is usually derived from Qty / Ratio.
-        # If we just output Qty, the frontend can calculate layers or we just say "Total allocations".
-        
-        rows_data = collections.defaultdict(dict) # color -> size -> qty
-        
-        has_content = False
-        for d_idx, d in enumerate(demands):
-            qty = solver.Value(allocation[(d_idx, g_idx)])
-            if qty > 0:
-                has_content = True
-                rows_data[d['color']][d['size']] = rows_data[d['color']].get(d['size'], 0) + qty
+            # While Demand Exists and Lot has space
+            while True:
+                available_sizes = [s for s, q in size_demand.items() if q > 0]
+                if not available_sizes: break
+                if lot.remaining_metraj < avg_cons: break # too small
                 
-        if not has_content:
-            continue
-            
-        # Create Cut Plan Object
-        # Flatten rows per color
-        plan_rows = []
-        for color, sizes_map in rows_data.items():
-             plan_rows.append({
-                 "colors": color,
-                 "layers": 1, # Dummy, since we allocated Quants directly
-                 "quantities": sizes_map
-             })
-             
-        # List used rolls
-        used_rolls_str = [str(r.topNo) for r in group['rolls']]
-        
-        summary_lines = []
-        for r in plan_rows:
-            q_str = ", ".join([f"{k}: {v}" for k,v in r['quantities'].items()])
-            summary_lines.append(f"{r['colors']} -> {q_str}")
-            
-        plans.append({
-            "id": plan_id,
-            "group_name": group['name'],
-            "shrinkage": group['name'], # Compat
-            "lot": group['name'].split('/')[0], # Rough
-            "mold": "Smart Group",
-            "totalLayers": sum(sum(r['quantities'].values()) for r in plan_rows), # Total Units actually
-            "markerRatio": {},
-            "rows": plan_rows,
-            "fabrics": f"Rolls: {', '.join(used_rolls_str)}",
-            "cut_summary": summary_lines,
-            "efficiency": 100.0,
-            "used_rolls": used_rolls_str
-        })
-        plan_id += 1
-        
+                size_groups = generate_size_groups(available_sizes)
+                
+                best_plan_data = None
+                best_qty = -1
+                
+                for group in size_groups:
+                    # Validate
+                    if not valid_pastal(group): continue
+                    
+                    layers, used_m, valid = calculate_layers_and_consumption(group, size_demand, lot, avg_cons)
+                    
+                    if not valid: continue
+                    
+                    qty = layers * len(group)
+                    
+                    # Greedy Metric: Maximize Qty
+                    if qty > best_qty:
+                        best_qty = qty
+                        best_plan_data = (group, layers, used_m)
+
+                if not best_plan_data:
+                    break # No valid move for this Lot + Demand
+                    
+                # Execute Best Move
+                group, layers, used_m = best_plan_data
+                
+                # Deduct Demand
+                for s in group:
+                    size_demand[s] -= layers
+                    
+                # Deduct Lot
+                lot.used_metraj += used_m
+                
+                # Record Plan
+                sizes_map = collections.Counter(group)
+                
+                plans.append({
+                    "id": cut_id_counter,
+                    "group_name": f"{color} - {lot.lot_id}",
+                    "shrinkage": lot.shrinkage_code,
+                    "lot": lot.lot_id,
+                    "mold": "Custom Algo",
+                    "used_rolls": [str(r.topNo) for r in lot.rolls], # Simplified
+                    "fabrics": f"Lot {lot.lot_id} ({used_m:.1f}m)",
+                    "cut_summary": [],
+                    "totalLayers": layers, # Note: Frontend shows "Adet" sometimes? User said "Kat: 35".
+                    "efficiency": 100.0,
+                    "markerRatio": dict(sizes_map), # { "32": 2, "34": 1 }
+                    "rows": [{
+                        "colors": color,
+                        "layers": layers,
+                        "quantities": {s: int(c * layers) for s,c in sizes_map.items()}
+                    }]
+                })
+                cut_id_counter += 1
+                
+                if lot.remaining_metraj < 1: break
+    
     return plans
 
 if __name__ == "__main__":

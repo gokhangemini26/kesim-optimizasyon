@@ -107,15 +107,12 @@ function App() {
 
     // 3. Triples (3 sizes)
     if (n >= 3) {
-      // Limit search space for performance if needed, but 3 levels is usually ok
       const step = n > 15 ? Math.floor(n / 5) : 1
       for (let i = 0; i < n; i += step) {
         for (let j = i + 1; j < n; j += step) {
           for (let k = j + 1; k < n; k += step) {
             const s1 = sorted[i], s2 = sorted[j], s3 = sorted[k]
-            // Standard 1-1-1
             groups.push([s1, s2, s3])
-            // Weighted variations (Heavy on one)
             groups.push([s1, s1, s2, s3])
             groups.push([s1, s2, s2, s3])
             groups.push([s1, s2, s3, s3])
@@ -172,8 +169,6 @@ function App() {
 
       while (true) {
         // A. CONSOLIDATE GLOBAL DEMAND
-        // Hybrid Approach: We optimize for the aggregate demand to minimize cuts,
-        // then distribute back to colors.
         const globalDemand = {}
         Object.values(currentDemands).forEach(colorDemand => {
           Object.entries(colorDemand).forEach(([sz, qty]) => {
@@ -188,251 +183,303 @@ function App() {
 
         // B. CANDIDATE GENERATION
         const candidates = []
-        ratio = { [uniqueSizes[0]]: 2, [uniqueSizes[1]]: 2 }
-        type = 'PAIR (2+2)'
-      } else if (sizeCount === 3) {
-        const maxDemandSize = uniqueSizes.sort((a, b) => currentDemands[b] - currentDemands[a])[0]
-        ratio = {}
-        uniqueSizes.forEach(s => ratio[s] = (s === maxDemandSize ? 2 : 1))
-        type = 'TRIPLE (2+1+1)'
-      } else {
-        ratio = {}
-        candidateSizes.forEach(s => ratio[s] = 1)
-        type = 'QUAD (1x4)'
+        const sizeGroups = generateSizeGroups(availableSizes)
+
+        // Pre-calculate demands to identify Core vs Fill
+        const maxDemand = Math.max(...availableSizes.map(s => globalDemand[s]))
+        const BIG_DEMAND_THRESHOLD = maxDemand * 0.35 // Core size threshold
+
+        sizeGroups.forEach(group => {
+          // 1. Calculate Ratio & Length
+          const ratio = {}
+          group.forEach(s => ratio[s] = (ratio[s] || 0) + 1)
+
+          let markerLen = 0
+          Object.entries(ratio).forEach(([s, r]) => {
+            const cons = (consumptionMode === 'SIZE' ? parseFloat(sizeConsumptions[s]) : 0) || avgConsumption
+            markerLen += (cons * r)
+          })
+          if (markerLen === 0) return
+
+          // 2. Calculate Max Layers (Greedy)
+          let maxLayersDemand = Infinity
+          Object.entries(ratio).forEach(([s, r]) => {
+            maxLayersDemand = Math.min(maxLayersDemand, Math.floor((globalDemand[s] || 0) / r))
+          })
+          if (maxLayersDemand === 0) maxLayersDemand = 1
+
+          const maxLayersFabric = Math.floor(lotMetraj / markerLen)
+
+          const targetLayers = Math.min(HARD_CAP, maxLayersDemand, maxLayersFabric)
+
+          if (targetLayers <= 0) return
+
+          // 3. CONSTRAINTS & FILTERS (The 6-Point Strategy)
+
+          // Constraint 5: MIN YIELD FILTER
+          const piecesPerLayer = group.length
+          const totalPieces = piecesPerLayer * targetLayers
+          // If we have plenty of work (>200 pcs), don't accept tiny cuts (<40 pcs)
+          if (totalRemainingQty > 200 && totalPieces < 40) return
+
+          // Constraint 3: SMALL SIZE PROTECTION
+          let isLimitedByFill = false
+          if (targetLayers < 50) {
+            const coreInGroup = group.filter(s => globalDemand[s] >= BIG_DEMAND_THRESHOLD)
+            const fillInGroup = group.filter(s => globalDemand[s] < BIG_DEMAND_THRESHOLD)
+            if (coreInGroup.length > 0 && fillInGroup.length > 0) {
+              let maxCoreLayers = Infinity
+              coreInGroup.forEach(s => {
+                maxCoreLayers = Math.min(maxCoreLayers, Math.floor(globalDemand[s] / (ratio[s] || 1)))
+              })
+              if (maxCoreLayers > targetLayers + 20) isLimitedByFill = true
+            }
+          }
+          if (isLimitedByFill) return // Reject
+
+          candidates.push({
+            group, ratio, markerLen, targetLayers, totalPieces
+          })
+        })
+
+        if (candidates.length === 0) break
+
+        // C. SELECTION LOGIC (Global Optimum)
+
+        // Constraint 2: PRIORITY LOCK (80 Layers)
+        const priorityCandidates = candidates.filter(c => c.targetLayers >= HARD_CAP)
+
+        // Constraint 4: SAME-SIZE LOCK (Deep Single Cuts)
+        const deepSingleCandidates = candidates.filter(c =>
+          Object.keys(c.ratio).length === 1 && c.targetLayers >= DEEP_CUT_THRESHOLD
+        )
+
+        let finalCandidates = candidates
+        let selectionReason = 'Standard'
+
+        if (priorityCandidates.length > 0) {
+          finalCandidates = priorityCandidates
+          selectionReason = 'Priority (80L)'
+        } else if (deepSingleCandidates.length > 0) {
+          finalCandidates = deepSingleCandidates
+          selectionReason = 'Deep Single Lock'
+        }
+
+        // SCORING
+        let best = null
+        let maxScore = -Infinity
+
+        finalCandidates.forEach(cand => {
+          // Constraint 1: CUTS SAVED (Metric)
+          const currentCutsEst = Math.ceil(totalRemainingQty / IDEAL_PIECES_PER_CUT)
+
+          let remainingAfter = 0
+          Object.entries(globalDemand).forEach(([s, qty]) => {
+            const used = (cand.ratio[s] || 0) * cand.targetLayers
+            remainingAfter += Math.max(0, qty - used)
+          })
+          const futureCutsEst = Math.ceil(remainingAfter / IDEAL_PIECES_PER_CUT)
+
+          const cutsSaved = currentCutsEst - futureCutsEst
+
+          // Constraint 6: LOOK-AHEAD
+          let fragmentPenalty = 0
+          Object.entries(cand.ratio).forEach(([s, r]) => {
+            const remaining = (globalDemand[s] || 0) - (cand.targetLayers * r)
+            if (remaining > 0 && remaining < 15) fragmentPenalty += 2000
+          })
+
+          // Final Score Formula
+          const score = (cutsSaved * 3000)
+            + (cand.totalPieces * 1.0)
+            + (cand.targetLayers * 10.0)
+            - fragmentPenalty
+
+          if (score > maxScore) {
+            maxScore = score
+            best = { ...cand, score, selectionReason }
+          }
+        })
+
+        if (!best) break
+
+        // D. EXECUTE (Greedy Layer Allocation to Colors)
+
+        const colorAllocations = {}
+        Object.keys(currentDemands).forEach(color => {
+          colorAllocations[color] = { layers: 0 }
+        })
+
+        let remainingLayers = best.targetLayers
+
+        // Distribute layers to colors
+        while (remainingLayers > 0) {
+          let bestColor = null
+          let maxNeedScore = -1
+
+          Object.entries(currentDemands).forEach(([color, demandMap]) => {
+            let absorption = 0
+            let pendingTotal = 0
+            Object.entries(best.ratio).forEach(([sz, r]) => {
+              const need = demandMap[sz] || 0
+              if (need > 0) absorption += Math.min(need, r)
+              pendingTotal += need
+            })
+
+            if (absorption > 0) {
+              const score = (absorption * 1000) + pendingTotal
+              if (score > maxNeedScore) {
+                maxNeedScore = score
+                bestColor = color
+              }
+            }
+          })
+
+          if (!bestColor) {
+            let maxGeneric = -1
+            Object.entries(currentDemands).forEach(([color, demandMap]) => {
+              const total = Object.values(demandMap).reduce((a, b) => a + b, 0)
+              if (total > maxGeneric) { maxGeneric = total; bestColor = color }
+            })
+          }
+
+          if (bestColor) {
+            colorAllocations[bestColor].layers += 1
+            remainingLayers--
+            Object.entries(best.ratio).forEach(([sz, r]) => {
+              currentDemands[bestColor][sz] = (currentDemands[bestColor][sz] || 0) - r
+            })
+          } else {
+            break
+          }
+        }
+
+        const planRows = []
+        Object.entries(colorAllocations).forEach(([color, data]) => {
+          if (data.layers > 0) {
+            const rowQuantities = {}
+            Object.entries(best.ratio).forEach(([sz, ratio]) => {
+              rowQuantities[sz] = data.layers * ratio
+            })
+
+            planRows.push({
+              colors: color,
+              layers: data.layers,
+              quantities: rowQuantities
+            })
+          }
+        })
+
+        if (planRows.length > 0) {
+          plans.push({
+            id: cutNo++,
+            shrinkage: `${lotGroup.mold} | LOT: ${lotGroup.lot}`,
+            lot: lotGroup.lot,
+            mold: lotGroup.mold,
+            totalLayers: best.targetLayers,
+            markerRatio: best.ratio,
+            markerLength: best.markerLen.toFixed(2),
+            rows: planRows,
+            fabrics: lotGroup.fabrics.map(f => f.topNo).join(', '),
+            note: `Reason: ${best.selectionReason} | Saved: ${Math.floor(best.score / 3000)}`
+          })
+
+          lotMetraj -= (best.targetLayers * best.markerLen)
+        } else {
+          break
+        }
       }
-
-      // Calc
-      let currentLength = 0
-      let piecesPerLayer = 0
-      Object.entries(ratio).forEach(([s, r]) => {
-        currentLength += getConsumption(s) * r
-        piecesPerLayer += r
-      })
-      if (currentLength === 0) return
-
-      const maxLayersFabric = Math.floor(currentGroup.totalMetraj / currentLength)
-      let maxLayersDemand = Infinity
-      Object.entries(ratio).forEach(([s, r]) => {
-        const d = currentDemands[s] || 0
-        maxLayersDemand = Math.min(maxLayersDemand, Math.floor(d / r))
-      })
-      if (maxLayersDemand === 0) maxLayersDemand = 1
-
-      const HARD_CAP = 80
-      let targetLayers = Math.min(HARD_CAP, maxLayersFabric, maxLayersDemand)
-
-      if (targetLayers <= 0) return
-
-      const totalPieces = piecesPerLayer * targetLayers
-
-      // POINT 5: MIN YIELD FILTER (Unless it's the last crumbs)
-      // If total remaining is large, don't accept tiny cuts
-      const MIN_YIELD = avgConsumption > 0 ? 50 : 20 // Arbitrary piece count floor
-      if (totalRemaining > 200 && totalPieces < 40) return
-
-      possibleCandidates.push({
-        ratio, type, targetLayers, totalPieces, currentLength, candidateSizes
-      })
     })
 
-    if (possibleCandidates.length === 0) break
+    console.log('✅ Scoring Engine Sonuçları:', plans)
 
-    // POINT 2: PRIORITY LOCK (80 Layers)
-    const priorityCandidates = possibleCandidates.filter(c => c.targetLayers >= 80)
-
-    // POINT 4: SAME-SIZE LOCK
-    // Check if any single size can do deep cut (e.g. > 65 layers) strictly on its own
-    const deepSingleCandidates = possibleCandidates.filter(c =>
-      c.candidateSizes.length === 1 && c.targetLayers >= 65
+    // ✅ 12. ÖZET RAPOR OLUŞTUR
+    const allSizesSet = new Set()
+    orderRows.forEach(order => {
+      Object.keys(order.quantities).forEach(sz => allSizesSet.add(sz))
+    })
+    const allSizes = Array.from(allSizesSet).sort((a, b) =>
+      String(a).localeCompare(String(b), undefined, { numeric: true })
     )
 
-    let finalCandidates = possibleCandidates
+    const summary = orderRows.map(order => {
+      const originalDemanded = {}
+      const planned = {}
 
-    if (priorityCandidates.length > 0) {
-      finalCandidates = priorityCandidates // Ignore everything else if we have 80 layers
-    } else if (deepSingleCandidates.length > 0) {
-      finalCandidates = deepSingleCandidates // Prefer cleaning single sizes deeply
-    }
+      allSizes.forEach(sz => {
+        originalDemanded[sz] = parseInt(order.quantities[sz]) || 0
+        planned[sz] = 0
 
-    // SCORING
-    finalCandidates.forEach(cand => {
-      // POINT 1: CUTS SAVED METRIC (Global Goal)
-      // simulate future cuts
-      // Crude simulation: Total Remaining After This / Ideal Pieces Per Cut (e.g. 200)
-
-      // State BEFORE
-      const currentTotalRemaining = Object.values(currentDemands).reduce((a, b) => a + b, 0)
-      const estimatedCutsBefore = Math.ceil(currentTotalRemaining / 160) // 160 approx ideal pcs per cut (40 layers * 4)
-
-      // State AFTER
-      let remAfter = 0
-      Object.entries(currentDemands).forEach(([s, qty]) => {
-        const consumed = cand.ratio[s] ? cand.targetLayers * cand.ratio[s] : 0
-        remAfter += Math.max(0, qty - consumed)
-      })
-      const estimatedCutsAfter = Math.ceil(remAfter / 160)
-
-      const cutsSaved = estimatedCutsBefore - estimatedCutsAfter
-
-      // SCORE
-      // Global Goal: CutsSaved is KING.
-      // Secondary: Efficiency (Layers).
-
-      const score = (cutsSaved * 3000)
-        + (cand.totalPieces * 1.0)
-        + ((cand.targetLayers / 80) * 500) // Layer efficiency
-
-      // POINT 6: REAL LOOK-AHEAD (Future Fragmentation)
-      // Penalize leaving random small bits
-      let fragmentPenalty = 0
-      Object.entries(cand.ratio).forEach(([s, r]) => {
-        const remaining = (currentDemands[s] || 0) - (cand.targetLayers * r)
-        if (remaining > 0 && remaining < 20) fragmentPenalty += 2000 // Huge penalty for leaving crumbs
+        plans.forEach(plan => {
+          plan.rows.forEach(r => {
+            if (r.colors === order.color) {
+              planned[sz] += (r.quantities[sz] || 0)
+            }
+          })
+        })
       })
 
-      const finalScore = score - fragmentPenalty
-
-      if (finalScore > bestScore) {
-        bestScore = finalScore
-        bestCandidate = {
-          ...cand,
-          score: finalScore,
-          note: `GS:${cutsSaved} L:${cand.targetLayers}`
-        }
+      return {
+        color: order.color,
+        demanded: originalDemanded,
+        planned: planned
       }
     })
 
-    if (!bestCandidate) {
-      currentGroup.totalMetraj = 0
-      continue
-    }
-
-    // EXECUTE
-    const { ratio, targetLayers: layers, currentLength: length, type, note } = bestCandidate
-
-    const producedQuantities = {}
-    Object.entries(ratio).forEach(([size, r]) => {
-      const qty = layers * r
-      producedQuantities[size] = qty
-      remainingDemands[color][size] = Math.max(0, remainingDemands[color][size] - qty)
-    })
-
-    const usedMetraj = layers * length
-    currentGroup.totalMetraj -= usedMetraj
-
-    plans.push({
-      id: cutNo++,
-      shrinkage: `${currentGroup.mold} | LOT: ${currentGroup.lot}`,
-      lot: currentGroup.lot,
-      mold: currentGroup.mold,
-      totalLayers: layers,
-      markerRatio: ratio,
-      markerLength: length.toFixed(2),
-      rows: [{
-        colors: color,
-        layers: layers,
-        quantities: producedQuantities
-      }],
-      fabrics: currentGroup.fabrics.map(f => f.topNo).join(', '),
-      usedMetraj: usedMetraj.toFixed(2),
-      availableMetraj: (currentGroup.totalMetraj + usedMetraj).toFixed(2),
-      remainingMetraj: currentGroup.totalMetraj.toFixed(2),
-      note: note || `Score: ${Math.floor(bestCandidate.score)}`
-    })
-  }
-})
-
-console.log('✅ Scoring Engine Sonuçları:', plans)
-
-// ✅ 12. ÖZET RAPOR OLUŞTUR
-const allSizesSet = new Set()
-orderRows.forEach(order => {
-  Object.keys(order.quantities).forEach(sz => allSizesSet.add(sz))
-})
-const allSizes = Array.from(allSizesSet).sort((a, b) =>
-  String(a).localeCompare(String(b), undefined, { numeric: true })
-)
-
-const summary = orderRows.map(order => {
-  const originalDemanded = {}
-  const planned = {}
-
-  allSizes.forEach(sz => {
-    originalDemanded[sz] = parseInt(order.quantities[sz]) || 0
-    planned[sz] = 0
-
-    plans.forEach(plan => {
-      plan.rows.forEach(r => {
-        if (r.colors === order.color) {
-          planned[sz] += (r.quantities[sz] || 0)
+    // ✅ 13. LOGLAMA
+    if (user) {
+      const totalPlannedCount = summary.reduce((acc, row =>
+        acc + Object.values(row.planned).reduce((a, b) => a + b, 0), 0
+      )
+      await supabase.from('logs').insert([{
+        user_id: user.id,
+        action: 'OPTIMIZATION_RUN',
+        details: {
+          plans_count: plans.length,
+          total_pieces: totalPlannedCount,
+          customer: selectedCustomer?.name,
+          extra_percentage: 5
         }
-      })
-    })
-  })
-
-  return {
-    color: order.color,
-    demanded: originalDemanded, // Orijinal sipariş
-    demandedWithExtra: colorDemands[order.color], // %5 fazla dahil
-    planned: planned
-  }
-})
-
-// ✅ 13. LOGLAMA
-if (user) {
-  const totalPlannedCount = summary.reduce((acc, row) =>
-    acc + Object.values(row.planned).reduce((a, b) => a + b, 0), 0
-  )
-  await supabase.from('logs').insert([{
-    user_id: user.id,
-    action: 'OPTIMIZATION_RUN',
-    details: {
-      plans_count: plans.length,
-      total_pieces: totalPlannedCount,
-      customer: selectedCustomer?.name,
-      extra_percentage: 5
+      }])
     }
-  }])
-}
 
-console.log('✅ Oluşturulan Planlar:', plans)
-console.log('📊 Özet Rapor:', summary)
+    console.log('📊 Özet Rapor:', summary)
 
-setResults(plans)
-setOptimizationSummary(summary)
-navigate('/results')
+    setResults(plans)
+    setOptimizationSummary(summary)
+    navigate('/results')
   }
 
-return (
-  <div className="min-h-screen bg-slate-50 text-slate-900">
-    <Routes>
-      <Route path="/" element={user ? (selectedCustomer ? (results ? <Navigate to="/results" /> : <Navigate to="/data-entry" />) : <Navigate to="/customers" />) : (isRegistering ? <Register onRegister={handleRegister} onSwitchToLogin={() => setIsRegistering(false)} /> : <Login onLogin={handleLogin} onSwitchToRegister={() => setIsRegistering(true)} />)} />
-      <Route path="/customers" element={user ? <CustomerManagement onSelectCustomer={handleSelectCustomer} onLogout={handleLogout} /> : <Navigate to="/" />} />
-      <Route path="/admin" element={user?.is_admin ? <AdminDashboard /> : <Navigate to="/" />} />
-      <Route path="/data-entry" element={user && selectedCustomer ? (
-        <div className="max-w-7xl mx-auto p-4 md:p-8 text-slate-900">
-          <header className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-8 bg-white p-6 rounded-3xl border border-slate-100 shadow-sm">
-            <div>
-              <h2 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-1">Müşteri Detayları</h2>
-              <h1 className="text-2xl font-black text-slate-900 flex items-center gap-2">{selectedCustomer.name} <span className="text-xs font-medium bg-primary-100 text-primary-700 px-2 py-1 rounded-lg">AKTİF SEÇİM</span></h1>
-              <div className="flex gap-4 mt-2 text-sm text-slate-500 font-medium">
-                <span className="flex items-center gap-1">En Tolerans: <span className="text-slate-900 font-bold">±{selectedCustomer.enTolerance}%</span></span>
-                <span className="flex items-center gap-1">Boy Tolerans: <span className="text-slate-900 font-bold">±{selectedCustomer.boyTolerance}%</span></span>
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-900">
+      <Routes>
+        <Route path="/" element={user ? (selectedCustomer ? (results ? <Navigate to="/results" /> : <Navigate to="/data-entry" />) : <Navigate to="/customers" />) : (isRegistering ? <Register onRegister={handleRegister} onSwitchToLogin={() => setIsRegistering(false)} /> : <Login onLogin={handleLogin} onSwitchToRegister={() => setIsRegistering(true)} />)} />
+        <Route path="/customers" element={user ? <CustomerManagement onSelectCustomer={handleSelectCustomer} onLogout={handleLogout} /> : <Navigate to="/" />} />
+        <Route path="/admin" element={user?.is_admin ? <AdminDashboard /> : <Navigate to="/" />} />
+        <Route path="/data-entry" element={user && selectedCustomer ? (
+          <div className="max-w-7xl mx-auto p-4 md:p-8 text-slate-900">
+            <header className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-8 bg-white p-6 rounded-3xl border border-slate-100 shadow-sm">
+              <div>
+                <h2 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-1">Müşteri Detayları</h2>
+                <h1 className="text-2xl font-black text-slate-900 flex items-center gap-2">{selectedCustomer.name} <span className="text-xs font-medium bg-primary-100 text-primary-700 px-2 py-1 rounded-lg">AKTİF SEÇİM</span></h1>
+                <div className="flex gap-4 mt-2 text-sm text-slate-500 font-medium">
+                  <span className="flex items-center gap-1">En Tolerans: <span className="text-slate-900 font-bold">±{selectedCustomer.enTolerance}%</span></span>
+                  <span className="flex items-center gap-1">Boy Tolerans: <span className="text-slate-900 font-bold">±{selectedCustomer.boyTolerance}%</span></span>
+                </div>
               </div>
-            </div>
-            <div className="flex gap-3">
-              {user?.is_admin && <button onClick={() => navigate('/admin')} className="bg-primary-50 hover:bg-primary-100 text-primary-700 font-bold px-5 py-2.5 rounded-xl transition-all border border-primary-100">Yönetim Paneli</button>}
-              <button onClick={() => { setSelectedCustomer(null); navigate('/customers') }} className="bg-slate-50 hover:bg-slate-100 text-slate-700 font-bold px-5 py-2.5 rounded-xl transition-all border border-slate-200">Müşteri Değiştir</button>
-              <button onClick={handleLogout} className="bg-red-50 hover:bg-red-100 text-red-600 font-bold px-5 py-2.5 rounded-xl transition-all border border-red-100">Çıkış Yap</button>
-            </div>
-          </header>
-          <DataEntryContainer customer={selectedCustomer} onPreparePlan={handlePreparePlan} orderRows={orderRows} setOrderRows={setOrderRows} fabricRows={fabricRows} setFabricRows={setFabricRows} consumptionMode={consumptionMode} setConsumptionMode={setConsumptionMode} avgConsumption={avgConsumption} setAvgConsumption={setAvgConsumption} sizeConsumptions={sizeConsumptions} setSizeConsumptions={setSizeConsumptions} sizeType={sizeType} setSizeType={setSizeType} groupingResults={groupingResults} setGroupingResults={setGroupingResults} />
-        </div>
-      ) : <Navigate to="/" />} />
-      <Route path="/results" element={results ? <ResultsView plans={results} summary={optimizationSummary} onBack={() => { setResults(null); setOptimizationSummary(null); navigate('/data-entry') }} /> : <Navigate to="/" />} />
-    </Routes>
-  </div>
-)
+              <div className="flex gap-3">
+                {user?.is_admin && <button onClick={() => navigate('/admin')} className="bg-primary-50 hover:bg-primary-100 text-primary-700 font-bold px-5 py-2.5 rounded-xl transition-all border border-primary-100">Yönetim Paneli</button>}
+                <button onClick={() => { setSelectedCustomer(null); navigate('/customers') }} className="bg-slate-50 hover:bg-slate-100 text-slate-700 font-bold px-5 py-2.5 rounded-xl transition-all border border-slate-200">Müşteri Değiştir</button>
+                <button onClick={handleLogout} className="bg-red-50 hover:bg-red-100 text-red-600 font-bold px-5 py-2.5 rounded-xl transition-all border border-red-100">Çıkış Yap</button>
+              </div>
+            </header>
+            <DataEntryContainer customer={selectedCustomer} onPreparePlan={handlePreparePlan} orderRows={orderRows} setOrderRows={setOrderRows} fabricRows={fabricRows} setFabricRows={setFabricRows} consumptionMode={consumptionMode} setConsumptionMode={setConsumptionMode} avgConsumption={avgConsumption} setAvgConsumption={setAvgConsumption} sizeConsumptions={sizeConsumptions} setSizeConsumptions={setSizeConsumptions} sizeType={sizeType} setSizeType={setSizeType} groupingResults={groupingResults} setGroupingResults={setGroupingResults} />
+          </div>
+        ) : <Navigate to="/" />} />
+        <Route path="/results" element={results ? <ResultsView plans={results} summary={optimizationSummary} onBack={() => { setResults(null); setOptimizationSummary(null); navigate('/data-entry') }} /> : <Navigate to="/" />} />
+      </Routes>
+    </div>
+  )
 }
 
 export default App

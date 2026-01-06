@@ -346,6 +346,7 @@ function App() {
 
           // SKOR FORMÜLÜ
           // 1. Demand Weight: Ne kadar çok iş eritiyoruz? (Adet bazlı)
+          const totalPieces = totalPiecesPerLayer * targetLayers
           const demandScore = totalPieces * 1.0
 
           // 2. Balance Score: Farklı bedenleri karıştırmak (Pastal verimi ve asorti dengesi)

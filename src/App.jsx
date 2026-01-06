@@ -229,39 +229,57 @@ function App() {
             (colorDemand[b] || 0) - (colorDemand[a] || 0)
           )
 
-          // TOP-DOWN SEARCH: Start from 80 layers, work down
-          outerLoop:
-          for (let targetLayers = HARD_CAP; targetLayers >= 1; targetLayers--) {
-            // For each layer count, try 4 sizes, then 3, then 2, then 1
-            for (let sizeCount = Math.min(4, sortedSizes.length); sizeCount >= 1; sizeCount--) {
-              const combos = getCombinations(sortedSizes, sizeCount)
+          // COLLECT ALL VALID COMBINATIONS
+          // Then pick the one with MOST TOTAL PIECES (layers × sizes)
+          const allValidCuts = []
 
-              for (const combo of combos) {
-                // Check if this combo can support targetLayers
-                if (!canSupportLayers(combo, targetLayers)) continue
+          for (let sizeCount = Math.min(4, sortedSizes.length); sizeCount >= 1; sizeCount--) {
+            const combos = getCombinations(sortedSizes, sizeCount)
 
-                // Check if fabric can support it
-                const markerLen = calcMarkerLen(combo)
-                if (markerLen === 0) continue
-                const maxLayersFabric = Math.floor(lotMetraj / markerLen)
-                if (maxLayersFabric < targetLayers) continue
-
-                // Found a valid combination!
-                const ratio = {}
-                combo.forEach(s => ratio[s] = 1)
-                const totalPieces = combo.length * targetLayers
-
-                best = {
-                  group: combo,
-                  ratio,
-                  markerLen,
-                  targetLayers,
-                  totalPieces,
-                  selectionReason: `${sizeCount}x @ ${targetLayers}L`
-                }
-                break outerLoop // Exit all loops - we found the best
+            for (const combo of combos) {
+              // Find max layers this combo can support
+              let maxLayersDemand = Infinity
+              for (const s of combo) {
+                maxLayersDemand = Math.min(maxLayersDemand, colorDemand[s] || 0)
               }
+              if (maxLayersDemand === 0) continue
+
+              // Check fabric constraint
+              const markerLen = calcMarkerLen(combo)
+              if (markerLen === 0) continue
+              const maxLayersFabric = Math.floor(lotMetraj / markerLen)
+
+              const targetLayers = Math.min(HARD_CAP, maxLayersDemand, maxLayersFabric)
+              if (targetLayers <= 0) continue
+
+              const totalPieces = combo.length * targetLayers
+
+              const ratio = {}
+              combo.forEach(s => ratio[s] = 1)
+
+              allValidCuts.push({
+                group: combo,
+                ratio,
+                markerLen,
+                targetLayers,
+                totalPieces,
+                sizeCount: combo.length,
+                selectionReason: `${combo.length}x @ ${targetLayers}L`
+              })
             }
+          }
+
+          // SELECTION: Pick by TOTAL PIECES (primary), then LAYER COUNT (tiebreaker)
+          if (allValidCuts.length > 0) {
+            allValidCuts.sort((a, b) => {
+              // Primary: Most total pieces
+              if (b.totalPieces !== a.totalPieces) return b.totalPieces - a.totalPieces
+              // Tiebreaker: More layers
+              if (b.targetLayers !== a.targetLayers) return b.targetLayers - a.targetLayers
+              // Tiebreaker: More sizes
+              return b.sizeCount - a.sizeCount
+            })
+            best = allValidCuts[0]
           }
 
           // If no valid cut found with normal search, allow 1-layer cleanup

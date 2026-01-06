@@ -199,9 +199,7 @@ export default function FabricTable({ rows, onUpdateRows, onGroupFabrics }) {
                                         <div className="text-xs">
                                             Excel'den kopyalayıp buraya yapıştırın veya 'Top Ekle' butonunu kullanın.
                                         </div>
-                                        <div className="text-xs font-bold text-emerald-600 mt-3">
-                                            💡 İpucu: "E55 B6" formatını da destekliyoruz!
-                                        </div>
+
                                     </div>
                                 </td>
                             </tr>

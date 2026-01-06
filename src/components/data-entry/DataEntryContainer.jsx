@@ -73,95 +73,65 @@ export default function DataEntryContainer({
             return
         }
 
-        const enT = customer.enTolerance
-        const boyT = customer.boyTolerance
-
-        // ✅ 1. ÇEKME GROUPLARİ OLUŞTUR
-        const cekmeGroups = {}
+        // ✅ 1. ÇEKME GROUPLARİ OLUŞTUR (0-5%, 5-10%, 10%+)
+        const groups = {
+            kalip1: {}, // 0-5%
+            kalip2: {}, // 5-10%
+            kalip3: {}  // 10%+
+        }
+        const totals = { k1: 0, k2: 0, k3: 0 }
 
         fabricRows.forEach((fabric, idx) => {
             const parsed = parseCekme(fabric.en + ' ' + fabric.boy)
 
-            // Her kumaşa parse edilmiş değerleri ekle
-            fabric.parsedEn = parsed.en
-            fabric.parsedBoy = parsed.boy
+            // Mutlak değerlerin en büyüğünü al (Hem en hem boy tolerans içinde olmalı)
+            const maxShrink = Math.max(Math.abs(parsed.en), Math.abs(parsed.boy))
 
-            // Grup anahtarı: Tolerans içinde olanlar aynı grupta
-            // Referans değerini ilk kumaştan al, sonrakiler buna göre grupla
-            let groupKey = null
+            let targetGroup = 'kalip3'
+            if (maxShrink <= 5) targetGroup = 'kalip1'
+            else if (maxShrink <= 10) targetGroup = 'kalip2'
+            // 10'dan büyükse kalip3
 
-            Object.keys(cekmeGroups).forEach(key => {
-                const [refEn, refBoy] = key.split('_').map(parseFloat)
-
-                const enCheck = isWithinTolerance(refEn, enT)
-                const boyCheck = isWithinTolerance(refBoy, boyT)
-
-                if (enCheck(parsed.en) && boyCheck(parsed.boy)) {
-                    groupKey = key
-                }
-            })
-
-            if (!groupKey) {
-                groupKey = `${parsed.en}_${parsed.boy}`
-                cekmeGroups[groupKey] = {}
-            }
-
-            // ✅ 2. AYNI ÇEKME GRUBUNDA LOT'LARA GÖRE ALT GRUPLAMA
             const lot = fabric.lot || 'BELİRSİZ'
 
-            if (!cekmeGroups[groupKey][lot]) {
-                cekmeGroups[groupKey][lot] = {
+            // Lot grubu var mı?
+            if (!groups[targetGroup][lot]) {
+                groups[targetGroup][lot] = {
                     lot: lot,
-                    cekmeKey: groupKey,
                     fabrics: [],
-                    totalMetraj: 0
+                    totalMetraj: 0,
+                    avgShrink: 0
                 }
             }
 
-            cekmeGroups[groupKey][lot].fabrics.push({
-                ...fabric,
-                index: idx
-            })
-            cekmeGroups[groupKey][lot].totalMetraj += parseFloat(fabric.metraj) || 0
+            const metraj = parseFloat(fabric.metraj) || 0
+            groups[targetGroup][lot].fabrics.push({ ...fabric, index: idx })
+            groups[targetGroup][lot].totalMetraj += metraj
+
+            // İstatistik için toplam
+            if (targetGroup === 'kalip1') totals.k1 += metraj
+            else if (targetGroup === 'kalip2') totals.k2 += metraj
+            else totals.k3 += metraj
         })
 
-        // ✅ 3. SONUÇLARI DÜZENLE
-        const allGroups = []
-        Object.values(cekmeGroups).forEach(lotGroups => {
-            Object.values(lotGroups).forEach(group => {
-                allGroups.push(group)
-            })
-        })
-
-        // Metraj'a göre sırala (büyükten küçüğe)
-        allGroups.sort((a, b) => b.totalMetraj - a.totalMetraj)
-
-        // ✅ 4. KALIP-1 ve KALIP-2'ye AYIR
-        // Kalıp-1: Referans çekme değerlerine en yakın grup (En büyük grup)
-        const kalip1 = []
-        const kalip2 = []
-
-        if (allGroups.length > 0) {
-            // İlk (en büyük metrajlı) grubu Kalıp-1 olarak al
-            kalip1.push(allGroups[0])
-
-            // Geri kalanları Kalıp-2'ye at
-            for (let i = 1; i < allGroups.length; i++) {
-                kalip2.push(allGroups[i])
-            }
-        }
-
+        // ✅ 2. SONUÇLARI DÜZENLE (Object -> Array)
         const result = {
-            kalip1: kalip1,
-            kalip2: kalip2,
-            kalip3: [], // Modal hatasını önlemek için boş
-            kalip1Total: kalip1.reduce((acc, curr) => acc + curr.totalMetraj, 0),
-            kalip2Total: kalip2.reduce((acc, curr) => acc + curr.totalMetraj, 0),
-            kalip3Total: 0,
-            allGroups: allGroups
+            kalip1: Object.values(groups.kalip1).sort((a, b) => b.totalMetraj - a.totalMetraj),
+            kalip2: Object.values(groups.kalip2).sort((a, b) => b.totalMetraj - a.totalMetraj),
+            kalip3: Object.values(groups.kalip3).sort((a, b) => b.totalMetraj - a.totalMetraj),
+            kalip1Total: totals.k1,
+            kalip2Total: totals.k2,
+            kalip3Total: totals.k3
         }
 
-        console.log('📊 Gruplama Sonuçları:', result)
+        // Optimizasyon motoru için düz liste
+        result.allGroups = [
+            ...result.kalip1,
+            ...result.kalip2,
+            ...result.kalip3
+        ]
+
+        console.log('📊 Tolerans Bazlı Gruplama:', result)
 
         setGroupingResults(result)
         setShowGrouping(true)

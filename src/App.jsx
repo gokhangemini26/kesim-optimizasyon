@@ -347,26 +347,34 @@ function App() {
           const totalPieces = totalPiecesPerLayer * targetLayers
           const demandScore = totalPieces * 1.0
 
-          // 2. Balance Score: Farklı bedenleri karıştırmak (Pastal verimi ve asorti dengesi)
-          const balanceScore = sizeCount * 300 // Çeşit başına 300 puan
+          // 2. Balance Score: Farklı bedenleri karıştırmak (Pastal verimi)
+          // Bu puanı düşürdük çünkü "Çok çeşit ama az kat" (Sığ kesim) istemiyoruz.
+          const balanceScore = sizeCount * 50 // (300 idi, 50 yaptık)
 
-          // 3. Efficiency Score: Kat sayısı kullanımı (Soft Cap'e yakınlık ve doluluk)
-          // 80 kat idealine ne kadar yakınız?
-          const efficiencyScore = (targetLayers / HARD_CAP) * 500
+          // 3. Efficiency Score: Kat sayısı kullanımı
+          // 80 kata ne kadar yakınız? Derin kesimleri ödüllendir.
+          const efficiencyScore = (targetLayers / HARD_CAP) * 1000 // (500 idi, 1000 yaptık)
 
-          // 4. Risk Penalty (LOOK AHEAD)
+          // 4. Bottleneck Penalty (Sığ Kesim Cezası)
+          // Kumaş varken kısa kesiyorsak ciddi ceza verelim.
+          let bottleneckPenalty = 0
+          if (targetLayers < 30 && maxLayersFabric > 40) {
+            bottleneckPenalty = 1500 // Sığ kesimden kaçın
+          }
+
+          // 5. Risk Penalty (LOOK AHEAD)
           let riskPenalty = 0
           Object.entries(ratio).forEach(([s, r]) => {
             const remaining = (currentDemands[s] || 0) - (targetLayers * r)
-            if (remaining > 0 && remaining < 10) {
-              riskPenalty += 1000 // Tehlikeli bölge (Ceza artırıldı)
+            if (remaining > 0 && remaining < 15) { // 10 -> 15 yaptık
+              riskPenalty += 1000
             }
             if (remaining < 0) {
               riskPenalty += Math.abs(remaining) * 100
             }
           })
 
-          const finalScore = demandScore + balanceScore + efficiencyScore - riskPenalty
+          const finalScore = demandScore + balanceScore + efficiencyScore - riskPenalty - bottleneckPenalty
 
           if (finalScore > bestScore) {
             bestScore = finalScore

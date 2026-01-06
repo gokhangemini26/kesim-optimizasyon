@@ -159,6 +159,9 @@ function App() {
     const plans = []
     let cutNo = 1
 
+    // Track initial fabric metraj
+    const totalInitialMetraj = fabricLots.reduce((sum, lot) => sum + (lot.totalMetraj || 0), 0)
+
     // Optimization Goals Constants
     const HARD_CAP = 80
     const DEEP_CUT_THRESHOLD = 65
@@ -443,8 +446,24 @@ function App() {
 
     console.log('📊 Özet Rapor:', summary)
 
+    // Calculate used metraj from plans
+    const totalUsedMetraj = plans.reduce((sum, plan) => {
+      return sum + (plan.totalLayers * parseFloat(plan.markerLength))
+    }, 0)
+    const totalRemainingMetraj = totalInitialMetraj - totalUsedMetraj
+
+    // Create metraj info object
+    const metrajInfo = {
+      initial: totalInitialMetraj.toFixed(2),
+      used: totalUsedMetraj.toFixed(2),
+      remaining: totalRemainingMetraj.toFixed(2),
+      usagePercent: ((totalUsedMetraj / totalInitialMetraj) * 100).toFixed(1)
+    }
+
+    console.log('📏 Kumaş Kullanımı:', metrajInfo)
+
     setResults(plans)
-    setOptimizationSummary(summary)
+    setOptimizationSummary({ summary, metrajInfo })
     navigate('/results')
   }
 

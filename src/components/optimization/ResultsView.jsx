@@ -5,23 +5,27 @@ import { jsPDF } from 'jspdf'
 import autoTable from 'jspdf-autotable'
 
 export default function ResultsView({ plans, summary, onBack }) {
+    // Handle both old format (array) and new format (object with summary and metrajInfo)
+    const summaryData = Array.isArray(summary) ? summary : (summary?.summary || [])
+    const metrajInfo = summary?.metrajInfo || null
+
     // Global sizes across the entire order (from the summary)
-    const globalSizes = summary && summary.length > 0
-        ? Object.keys(summary[0].demanded).sort((a, b) =>
+    const globalSizes = summaryData && summaryData.length > 0
+        ? Object.keys(summaryData[0].demanded).sort((a, b) =>
             String(a).localeCompare(String(b), undefined, { numeric: true })
         )
         : []
 
     // Global totals
-    const totalOriginalDemand = summary ? summary.reduce((acc, item) =>
+    const totalOriginalDemand = summaryData ? summaryData.reduce((acc, item) =>
         acc + Object.values(item.demanded).reduce((a, b) => a + b, 0), 0
     ) : 0
 
-    const totalWithExtra = summary ? summary.reduce((acc, item) =>
+    const totalWithExtra = summaryData ? summaryData.reduce((acc, item) =>
         acc + Object.values(item.demandedWithExtra || item.demanded).reduce((a, b) => a + b, 0), 0
     ) : 0
 
-    const totalPlanned = summary ? summary.reduce((acc, item) =>
+    const totalPlanned = summaryData ? summaryData.reduce((acc, item) =>
         acc + Object.values(item.planned).reduce((a, b) => a + b, 0), 0
     ) : 0
 
@@ -44,7 +48,7 @@ export default function ResultsView({ plans, summary, onBack }) {
         const wb = XLSX.utils.book_new()
 
         // Summary Sheet
-        const summaryData = summary.map(item => {
+        const excelSummaryData = summaryData.map(item => {
             const row = { 'RENK': item.color }
             globalSizes.forEach(size => {
                 row[`${size} (SİPARİŞ)`] = item.demanded[size] || 0
@@ -58,7 +62,7 @@ export default function ResultsView({ plans, summary, onBack }) {
             row['FARK'] = totalP - totalD
             return row
         })
-        const wsSummary = XLSX.utils.json_to_sheet(summaryData)
+        const wsSummary = XLSX.utils.json_to_sheet(excelSummaryData)
         XLSX.utils.book_append_sheet(wb, wsSummary, "Ozet Rapor")
 
         // Individual Plans
@@ -101,7 +105,7 @@ export default function ResultsView({ plans, summary, onBack }) {
         doc.text(trFix("OZET RAPOR"), 14, 40)
 
         const summaryHeaders = [['RENK', ...globalSizes, 'SIPARIS', 'PLAN', 'FARK']]
-        const summaryBody = summary.map(item => {
+        const summaryBody = summaryData.map(item => {
             const totalP = Object.values(item.planned).reduce((a, b) => a + b, 0)
             const totalD = Object.values(item.demanded).reduce((a, b) => a + b, 0)
             return [
@@ -284,7 +288,7 @@ export default function ResultsView({ plans, summary, onBack }) {
             </div>
 
             {/* Summary Report */}
-            {summary && (
+            {summaryData && summaryData.length > 0 && (
                 <div className="mt-20">
                     <div className="flex items-center gap-4 mb-8">
                         <div className="h-1 flex-1 bg-slate-200 rounded-full"></div>
@@ -314,7 +318,7 @@ export default function ResultsView({ plans, summary, onBack }) {
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {summary.map((item, idx) => {
+                                    {summaryData.map((item, idx) => {
                                         const totalOriginal = Object.values(item.demanded).reduce((a, b) => a + b, 0)
                                         const totalPlannedRow = Object.values(item.planned).reduce((a, b) => a + b, 0)
                                         const diffRow = totalPlannedRow - totalOriginal
@@ -363,28 +367,58 @@ export default function ResultsView({ plans, summary, onBack }) {
                         </div>
 
                         {/* Footer Statistics */}
-                        <div className="p-8 bg-slate-900 text-white flex flex-col md:flex-row justify-between items-center gap-8">
-                            <div className="flex flex-wrap gap-8 md:gap-16">
-                                <div>
-                                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-[0.2em] block mb-2">ORİJİNAL SİPARİŞ</span>
-                                    <span className="text-4xl font-black">{totalOriginalDemand}</span>
+                        <div className="p-8 bg-slate-900 text-white flex flex-col gap-6">
+                            <div className="flex flex-wrap justify-between items-center gap-8">
+                                <div className="flex flex-wrap gap-8 md:gap-16">
+                                    <div>
+                                        <span className="text-[10px] font-bold text-slate-500 uppercase tracking-[0.2em] block mb-2">ORİJİNAL SİPARİŞ</span>
+                                        <span className="text-4xl font-black">{totalOriginalDemand}</span>
+                                    </div>
+                                    <div className="hidden md:block h-16 w-px bg-slate-800"></div>
+                                    <div>
+                                        <span className="text-[10px] font-bold text-emerald-500 uppercase tracking-[0.2em] block mb-2">TOPLAM PLANLANAN</span>
+                                        <span className="text-4xl font-black text-emerald-400">{totalPlanned}</span>
+                                    </div>
                                 </div>
-                                <div className="hidden md:block h-16 w-px bg-slate-800"></div>
-                                <div>
-                                    <span className="text-[10px] font-bold text-emerald-500 uppercase tracking-[0.2em] block mb-2">TOPLAM PLANLANAN</span>
-                                    <span className="text-4xl font-black text-emerald-400">{totalPlanned}</span>
+
+                                <div className="flex items-center gap-8 bg-white/5 p-6 rounded-[30px] border border-white/10">
+                                    <div className="text-right">
+                                        <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-[0.2em] block mb-1">FAZLA KESİLEN (%5)</span>
+                                        <span className="text-3xl font-black text-emerald-500">+{totalExtra}</span>
+                                    </div>
+                                    <div className="p-3 rounded-2xl shadow-xl bg-emerald-500 shadow-emerald-500/20">
+                                        <TrendingUp className="text-white w-8 h-8" />
+                                    </div>
                                 </div>
                             </div>
 
-                            <div className="flex items-center gap-8 bg-white/5 p-6 rounded-[30px] border border-white/10">
-                                <div className="text-right">
-                                    <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-[0.2em] block mb-1">FAZLA KESİLEN (%5)</span>
-                                    <span className="text-3xl font-black text-emerald-500">+{totalExtra}</span>
+                            {/* Fabric Metraj Info */}
+                            {metrajInfo && (
+                                <div className="pt-6 border-t border-slate-700">
+                                    <div className="flex flex-wrap justify-between items-center gap-8">
+                                        <div className="flex flex-wrap gap-8 md:gap-12">
+                                            <div>
+                                                <span className="text-[10px] font-bold text-blue-400 uppercase tracking-[0.2em] block mb-2">TOPLAM MEVCUT KUMAŞ</span>
+                                                <span className="text-2xl font-black text-blue-300">{metrajInfo.initial} m</span>
+                                            </div>
+                                            <div className="hidden md:block h-12 w-px bg-slate-700"></div>
+                                            <div>
+                                                <span className="text-[10px] font-bold text-amber-400 uppercase tracking-[0.2em] block mb-2">KESİLEN KUMAŞ</span>
+                                                <span className="text-2xl font-black text-amber-300">{metrajInfo.used} m</span>
+                                            </div>
+                                            <div className="hidden md:block h-12 w-px bg-slate-700"></div>
+                                            <div>
+                                                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em] block mb-2">KALAN KUMAŞ</span>
+                                                <span className="text-2xl font-black text-slate-300">{metrajInfo.remaining} m</span>
+                                            </div>
+                                        </div>
+                                        <div className="bg-gradient-to-r from-blue-600 to-cyan-500 px-6 py-4 rounded-2xl">
+                                            <span className="text-[10px] font-bold text-white/80 uppercase tracking-[0.2em] block mb-1">KUMAŞ KULLANIM ORANI</span>
+                                            <span className="text-3xl font-black text-white">%{metrajInfo.usagePercent}</span>
+                                        </div>
+                                    </div>
                                 </div>
-                                <div className="p-3 rounded-2xl shadow-xl bg-emerald-500 shadow-emerald-500/20">
-                                    <TrendingUp className="text-white w-8 h-8" />
-                                </div>
-                            </div>
+                            )}
                         </div>
                     </div>
                 </div>

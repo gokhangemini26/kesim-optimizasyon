@@ -345,28 +345,29 @@ function App() {
           if (targetLayers <= 0) return
 
           // SKOR FORMÜLÜ
-          // 1. Demand Weight: Ne kadar çok iş eritiyoruz?
-          const totalPieces = totalPiecesPerLayer * targetLayers
-          const demandScore = totalPieces
+          // 1. Demand Weight: Ne kadar çok iş eritiyoruz? (Adet bazlı)
+          const demandScore = totalPieces * 1.0
 
-          // 2. Balance Score: Farklı bedenleri karıştırmak genelde iyidir (pastal verimi)
-          const balanceScore = sizeCount * 200 // Her çeşit için +200 puan
+          // 2. Balance Score: Farklı bedenleri karıştırmak (Pastal verimi ve asorti dengesi)
+          const balanceScore = sizeCount * 300 // Çeşit başına 300 puan
 
-          // 3. Risk Penalty (LOOK AHEAD)
-          // Bu kesimi yaparsak geriye ne kalıyor?
-          // "Problemli Beden" = Az kalan (örn 10'dan az) ve tek başına kalan.
+          // 3. Efficiency Score: Kat sayısı kullanımı (Soft Cap'e yakınlık ve doluluk)
+          // 80 kat idealine ne kadar yakınız?
+          const efficiencyScore = (targetLayers / HARD_CAP) * 500
+
+          // 4. Risk Penalty (LOOK AHEAD)
           let riskPenalty = 0
           Object.entries(ratio).forEach(([s, r]) => {
             const remaining = (currentDemands[s] || 0) - (targetLayers * r)
             if (remaining > 0 && remaining < 10) {
-              riskPenalty += 500 // Tehlikeli bölge
+              riskPenalty += 1000 // Tehlikeli bölge (Ceza artırıldı)
             }
-            if (remaining < 0) { // Fazla kesim (bunu engellemiyoruz ama ceza verelim)
-              riskPenalty += Math.abs(remaining) * 50 // Gereksiz fazla kesim cezası
+            if (remaining < 0) {
+              riskPenalty += Math.abs(remaining) * 100
             }
           })
 
-          const finalScore = (demandScore * 1.0) + (balanceScore) - (riskPenalty)
+          const finalScore = demandScore + balanceScore + efficiencyScore - riskPenalty
 
           if (finalScore > bestScore) {
             bestScore = finalScore

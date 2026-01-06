@@ -278,26 +278,17 @@ function App() {
           const sizeCount = uniqueSizes.length
 
           if (sizeCount === 1) {
-            // Same size -> 4x (Tek bedenden 4 tane, veya 1 tane * 4 kat gibi düşünülür ama markerde 4 adet olması fireyi azaltır)
-            // Ancak basitlik için: Her bedenden 1 tane koyup katı artırmak daha kolaydır.
-            // Fakat "Pattern Recipe" kuralına göre:
-            // Marker'da o bedenden kaç kopya olacağı.
             ratio = { [candidateSizes[0]]: 4 }
             type = 'SAME (4x)'
           } else if (sizeCount === 2) {
-            // 2 Beden -> 2+2
             ratio = { [uniqueSizes[0]]: 2, [uniqueSizes[1]]: 2 }
             type = 'PAIR (2+2)'
           } else if (sizeCount === 3) {
-            // 3 Beden -> 1+1+1 (Belki en çok istenenden +1 eklenebilir ama standart 1-1-1)
-            // Kullanıcı isteği: Mixed 2+1+1 (En çok istenenden 2)
-            // En çok talep edilen hangisi?
             const maxDemandSize = uniqueSizes.sort((a, b) => currentDemands[b] - currentDemands[a])[0]
             ratio = {}
             uniqueSizes.forEach(s => ratio[s] = (s === maxDemandSize ? 2 : 1))
             type = 'TRIPLE (2+1+1)'
           } else {
-            // 4 Beden -> 1+1+1+1
             ratio = {}
             candidateSizes.forEach(s => ratio[s] = 1)
             type = 'QUAD (1x4)'
@@ -305,10 +296,10 @@ function App() {
 
           // HESAPLAMALAR
           let currentLength = 0
-          let totalPiecesPerLayer = 0
+          let piecesPerLayer = 0
           Object.entries(ratio).forEach(([s, r]) => {
             currentLength += getConsumption(s) * r
-            totalPiecesPerLayer += r
+            piecesPerLayer += r
           })
 
           if (currentLength === 0) return
@@ -320,61 +311,79 @@ function App() {
             const d = currentDemands[s] || 0
             maxLayersDemand = Math.min(maxLayersDemand, Math.floor(d / r))
           })
-          if (maxLayersDemand === 0) maxLayersDemand = 1 // Zorla
+          if (maxLayersDemand === 0) maxLayersDemand = 1
 
-          // KAT YÖNETİMİ (Soft Cap)
-          // İdeal: 40-65 arası. Max: 80
-          // Eğer optimum 50 ise ve biz 80 yapabiliyorsak, 80 yapmak yerine 65'te kesmek daha iyi olabilir (kalite için)
-          // Ama işi bitirmek için 80'e çıkmaya izin verilir.
+          // KAT YÖNETİMİ (Soft Cap: 60)
+          // Global Hedef için 60 kat yeterince iyidir. 80'e sadece gerekirse çık.
           const SOFT_CAP = 65
           const HARD_CAP = 80
 
           let targetLayers = Math.min(HARD_CAP, maxLayersFabric, maxLayersDemand)
 
-          // Eğre talep çoksa ve fabric yetiyorsa Soft Cap uygula
-          // Sadece çok küçük parçalar kalmasın diye kontrol et
-          if (targetLayers > SOFT_CAP) {
-            // Eğer 65 yaptığımda kalan parça çok küçük (örn 5 katlık) olacaksa, hepsini 80'de bitirmek daha iyidir.
-            // Ama 120 katlık iş varsa 60+60 bölmek iyidir.
-            // Şimdilik basit soft cap:
-            if (maxLayersDemand > 100) targetLayers = SOFT_CAP
-          }
+          // Soft Cap Uygulaması (Eğer çok iş bitirmiyorsa ve kumaş yetiyorsa 65'te tutabiliriz ama şimdilik max zorlayalım)
+          // Yeni mantıkta: Max kat her zaman iyidir ama "ne pahasına" olduğuna bakacağız.
 
           if (targetLayers <= 0) return
 
-          // SKOR FORMÜLÜ
-          // 1. Demand Weight: Ne kadar çok iş eritiyoruz? (Adet bazlı)
-          const totalPieces = totalPiecesPerLayer * targetLayers
-          const demandScore = totalPieces * 1.0
+          // --- YENİ SKORLAMA: GLOBAL EFFICIENCY (CES) ---
 
-          // 2. Balance Score: Farklı bedenleri karıştırmak (Pastal verimi)
-          // Bu puanı düşürdük çünkü "Çok çeşit ama az kat" (Sığ kesim) istemiyoruz.
-          const balanceScore = sizeCount * 50 // (300 idi, 50 yaptık)
+          const totalPieces = piecesPerLayer * targetLayers
 
-          // 3. Efficiency Score: Kat sayısı kullanımı
-          // 80 kata ne kadar yakınız? Derin kesimleri ödüllendir.
-          const efficiencyScore = (targetLayers / HARD_CAP) * 1000 // (500 idi, 1000 yaptık)
-
-          // 4. Bottleneck Penalty (Sığ Kesim Cezası)
-          // Kumaş varken kısa kesiyorsak ciddi ceza verelim.
-          let bottleneckPenalty = 0
-          if (targetLayers < 30 && maxLayersFabric > 40) {
-            bottleneckPenalty = 1500 // Sığ kesimden kaçın
-          }
-
-          // 5. Risk Penalty (LOOK AHEAD)
-          let riskPenalty = 0
+          // 1. Cut Efficiency Score (CES) - ANA MOTOR
+          // "Bu kesim kaç işi bitiriyor?"
+          let finishedSizesCount = 0
           Object.entries(ratio).forEach(([s, r]) => {
             const remaining = (currentDemands[s] || 0) - (targetLayers * r)
-            if (remaining > 0 && remaining < 15) { // 10 -> 15 yaptık
-              riskPenalty += 1000
-            }
-            if (remaining < 0) {
-              riskPenalty += Math.abs(remaining) * 100
+            if (remaining <= 0) finishedSizesCount++
+            // Veya çok az kaldıysa da bitmiş sayabiliriz (Örn < 3)
+            else if (remaining < 3) finishedSizesCount++
+          })
+
+          const cutEfficiencyScore = (totalPieces * 2.0)
+            + (finishedSizesCount * 400) // Bir bedeni bitirmek çok değerlidir
+            + (totalPieces >= 200 ? 500 : 0) // Büyük parti bonusu
+
+          // 2. Depth Score (Yumuşatılmış)
+          // 60 kattan sonrası için ekstra puan yok. 60 kat = 80 kat kadar iyidir.
+          const depthScore = Math.min(targetLayers, 60) * 10
+
+          // 3. Balance Score (Minimal)
+          const balanceScore = sizeCount * 50
+
+          // 4. PENALTILAR
+          let penalty = 0
+
+          // A. Bottleneck Penalty (Tersine Çevrilmiş)
+          // Az kat (<30) VE Az İş (<100) ise ceza ver.
+          // Yani: "Hem sığ kesiyorsun hem de az iş yapıyorsun, yapma."
+          if (targetLayers < 30 && totalPieces < 100 && maxLayersFabric > 40) {
+            penalty += 1500
+          }
+
+          // B. Future Fragment Risk (Beden Bazlı Look-Ahead)
+          // Bu kesimi yaparsam, geriye "tek başına kalmış" ve "az kalmış" bir beden bırakıyor muyum?
+          // Bu durum gelecekte ekstra bir kesim demektir.
+          let futureZombieCount = 0
+          const futureRemains = {}
+          let remainingTypes = 0
+
+          // Geleceği simüle et
+          Object.keys(currentDemands).forEach(s => {
+            const r = ratio[s] || 0
+            const left = (currentDemands[s] || 0) - (targetLayers * r)
+            if (left > 0) {
+              remainingTypes++
+              futureRemains[s] = left
+              if (left < 40) futureZombieCount++ // 40 adetten az kalan "zombi" beden
             }
           })
 
-          const finalScore = demandScore + balanceScore + efficiencyScore - riskPenalty - bottleneckPenalty
+          // Eğer geriye sadece 1 çeşit beden kalıyorsa ve o da azsa (zombi), bu çok kötü.
+          if (remainingTypes === 1 && futureZombieCount === 1) {
+            penalty += 2000 // Geleceği kirletme cezası
+          }
+
+          const finalScore = cutEfficiencyScore + depthScore + balanceScore - penalty
 
           if (finalScore > bestScore) {
             bestScore = finalScore
@@ -384,7 +393,8 @@ function App() {
               length: currentLength,
               type,
               pieces: totalPieces,
-              score: finalScore
+              score: finalScore,
+              note: `CES:${Math.floor(cutEfficiencyScore)} D:${depthScore}`
             }
           }
         })

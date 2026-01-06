@@ -221,9 +221,31 @@ function App() {
             const piecesPerLayer = group.length
             const totalPieces = piecesPerLayer * targetLayers
 
-            // Adaptive yield filter
-            if (totalColorDemand > 500 && totalPieces < 40) return
-            if (totalColorDemand > 200 && totalPieces < 20) return
+            // AGGRESSIVE MINIMUM LAYER FILTER
+            // Main Phase: If we have substantial demand (>100 pcs), reject cuts under 15 layers
+            // This prevents 2-3 layer garbage cuts
+            if (totalColorDemand > 100 && targetLayers < 15) return
+
+            // Also reject if a SIZE is limiting us to low layers while others could go deeper
+            // Find which size is the bottleneck
+            let limitingSize = null
+            let limitingLayers = Infinity
+            Object.entries(ratio).forEach(([s, r]) => {
+              const maxForThis = Math.floor((colorDemand[s] || 0) / r)
+              if (maxForThis < limitingLayers) {
+                limitingLayers = maxForThis
+                limitingSize = s
+              }
+            })
+
+            // If a small-demand size is limiting us to <20 layers, skip this combination
+            // Let deeper cuts happen without this size, then clean it up later
+            if (limitingLayers < 20 && Object.keys(ratio).length > 1) {
+              const limitingSizeDemand = colorDemand[limitingSize] || 0
+              const avgDemand = totalColorDemand / colorSizes.length
+              // If limiting size has much less demand than average, reject
+              if (limitingSizeDemand < avgDemand * 0.5) return
+            }
 
             candidates.push({
               group, ratio, markerLen, targetLayers, totalPieces
@@ -265,8 +287,13 @@ function App() {
             const cutsSaved = currentCutsEst - futureCutsEst
 
             const layerRatio = cand.targetLayers / HARD_CAP
-            const depthScore = Math.pow(layerRatio, 3) * 5000
-            const shallowPenalty = (cand.targetLayers < 40) ? 3000 : 0
+            const depthScore = Math.pow(layerRatio, 2) * 15000 // MASSIVE reward for deep cuts
+
+            // Penalty for shallow cuts - this overrides combination benefit
+            let shallowPenalty = 0
+            if (cand.targetLayers < 20) shallowPenalty = 20000 // Almost never accept
+            else if (cand.targetLayers < 30) shallowPenalty = 10000
+            else if (cand.targetLayers < 40) shallowPenalty = 5000
 
             let fragmentPenalty = 0
             Object.entries(cand.ratio).forEach(([s, r]) => {
@@ -274,25 +301,24 @@ function App() {
               if (remaining > 0 && remaining < 20) fragmentPenalty += 2000
             })
 
-            // NEW: COMBINATION PRIORITY BONUS
-            // Heavily reward candidates that include more unique sizes
-            // This encourages combining 31/32 + 32/32 + 33/32 into ONE cut vs separate cuts
+            // REDUCED: Combination bonus - still prefer more sizes but not at cost of depth
             const uniqueSizeCount = Object.keys(cand.ratio).length
-            const combinationBonus = uniqueSizeCount * 8000 // HUGE bonus per extra size
+            const combinationBonus = uniqueSizeCount * 2000 // Reduced from 8000
 
-            // Also bonus for finishing sizes completely (no remainders)
+            // Completion bonus
             let completionBonus = 0
             Object.entries(cand.ratio).forEach(([s, r]) => {
               const remaining = (colorDemand[s] || 0) - (cand.targetLayers * r)
-              if (remaining === 0) completionBonus += 3000 // Finished this size
+              if (remaining === 0) completionBonus += 1500
             })
 
-            const score = (cutsSaved * 10000)
-              + depthScore
-              + combinationBonus              // NEW: Favor more sizes
-              + completionBonus               // NEW: Favor finishing sizes
-              + (cand.totalPieces * 0.5)
-              - shallowPenalty
+            // DEPTH IS KING
+            const score = (cutsSaved * 8000)
+              + depthScore                    // HUGE weight on depth
+              + combinationBonus              // Reduced weight
+              + completionBonus
+              + (cand.totalPieces * 0.3)
+              - shallowPenalty                // MASSIVE penalty for shallow
               - fragmentPenalty
 
             if (score > maxScore) {

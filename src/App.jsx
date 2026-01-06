@@ -164,245 +164,158 @@ function App() {
     const DEEP_CUT_THRESHOLD = 65
     const IDEAL_PIECES_PER_CUT = 160 // 4 sizes * 40 layers approx
 
-    fabricLots.forEach(lotGroup => {
-      let lotMetraj = lotGroup.totalMetraj
+    // NEW STRUCTURE: Color-first, Lot-second
+    // For each color, cut maximally from each lot before moving to the next lot
 
-      while (true) {
-        // A. CONSOLIDATE GLOBAL DEMAND
-        const globalDemand = {}
-        Object.values(currentDemands).forEach(colorDemand => {
-          Object.entries(colorDemand).forEach(([sz, qty]) => {
-            globalDemand[sz] = (globalDemand[sz] || 0) + qty
+    const colors = Object.keys(currentDemands)
+
+    colors.forEach(color => {
+      const colorDemand = currentDemands[color]
+
+      // Iterate through lots for this color
+      fabricLots.forEach(lotGroup => {
+        if (lotGroup.totalMetraj <= 0) return // Skip exhausted lots
+
+        let lotMetraj = lotGroup.totalMetraj
+        let loopSafety = 0
+
+        while (loopSafety++ < 200) {
+          // Check if this color still has demand
+          const colorSizes = Object.keys(colorDemand).filter(s => colorDemand[s] > 0)
+          if (colorSizes.length === 0) break
+          if (lotMetraj <= 0) break
+
+          const totalColorDemand = colorSizes.reduce((sum, s) => sum + colorDemand[s], 0)
+
+          // Generate candidates for THIS COLOR only
+          const candidates = []
+          const sizeGroups = generateSizeGroups(colorSizes)
+
+          const maxDemand = Math.max(...colorSizes.map(s => colorDemand[s]))
+          const BIG_DEMAND_THRESHOLD = maxDemand * 0.35
+
+          sizeGroups.forEach(group => {
+            const ratio = {}
+            group.forEach(s => ratio[s] = (ratio[s] || 0) + 1)
+
+            let markerLen = 0
+            Object.entries(ratio).forEach(([s, r]) => {
+              const cons = (consumptionMode === 'SIZE' ? parseFloat(sizeConsumptions[s]) : 0) || avgConsumption
+              markerLen += (cons * r)
+            })
+            if (markerLen === 0) return
+
+            // Max layers from demand
+            let maxLayersDemand = Infinity
+            Object.entries(ratio).forEach(([s, r]) => {
+              maxLayersDemand = Math.min(maxLayersDemand, Math.floor((colorDemand[s] || 0) / r))
+            })
+            if (maxLayersDemand === 0) return
+
+            // Max layers from fabric
+            const maxLayersFabric = Math.floor(lotMetraj / markerLen)
+
+            const targetLayers = Math.min(HARD_CAP, maxLayersDemand, maxLayersFabric)
+            if (targetLayers <= 0) return
+
+            const piecesPerLayer = group.length
+            const totalPieces = piecesPerLayer * targetLayers
+
+            // Adaptive yield filter
+            if (totalColorDemand > 500 && totalPieces < 40) return
+            if (totalColorDemand > 200 && totalPieces < 20) return
+
+            candidates.push({
+              group, ratio, markerLen, targetLayers, totalPieces
+            })
           })
-        })
 
-        const availableSizes = Object.keys(globalDemand).filter(s => globalDemand[s] > 0)
-        if (availableSizes.length === 0) break
+          if (candidates.length === 0) break
 
-        const totalRemainingQty = Object.values(globalDemand).reduce((a, b) => a + b, 0)
+          // SELECTION: Prioritize deep cuts
+          const priorityCandidates = candidates.filter(c => c.targetLayers >= HARD_CAP)
+          const deepSingleCandidates = candidates.filter(c =>
+            Object.keys(c.ratio).length === 1 && c.targetLayers >= DEEP_CUT_THRESHOLD
+          )
 
-        // B. CANDIDATE GENERATION
-        const candidates = []
-        const sizeGroups = generateSizeGroups(availableSizes)
+          let finalCandidates = candidates
+          let selectionReason = 'Standard'
 
-        // Pre-calculate demands to identify Core vs Fill
-        const maxDemand = Math.max(...availableSizes.map(s => globalDemand[s]))
-        const BIG_DEMAND_THRESHOLD = maxDemand * 0.35 // Core size threshold
-
-        sizeGroups.forEach(group => {
-          // 1. Calculate Ratio & Length
-          const ratio = {}
-          group.forEach(s => ratio[s] = (ratio[s] || 0) + 1)
-
-          let markerLen = 0
-          Object.entries(ratio).forEach(([s, r]) => {
-            const cons = (consumptionMode === 'SIZE' ? parseFloat(sizeConsumptions[s]) : 0) || avgConsumption
-            markerLen += (cons * r)
-          })
-          if (markerLen === 0) return
-
-          // 2. Calculate Max Layers (Greedy)
-          let maxLayersDemand = Infinity
-          Object.entries(ratio).forEach(([s, r]) => {
-            maxLayersDemand = Math.min(maxLayersDemand, Math.floor((globalDemand[s] || 0) / r))
-          })
-          if (maxLayersDemand === 0) maxLayersDemand = 1
-
-          const maxLayersFabric = Math.floor(lotMetraj / markerLen)
-
-          const targetLayers = Math.min(HARD_CAP, maxLayersDemand, maxLayersFabric)
-
-          if (targetLayers <= 0) return
-
-          // 3. CONSTRAINTS & FILTERS (The 6-Point Strategy)
-
-          // Constraint 5: MIN YIELD FILTER (Adaptive)
-          const piecesPerLayer = group.length
-          const totalPieces = piecesPerLayer * targetLayers
-          // Adaptive filtering based on remaining work:
-          // Only reject very small cuts (< 20 pieces) if we have substantial work left
-          if (totalRemainingQty > 500 && totalPieces < 40) return
-          if (totalRemainingQty > 200 && totalPieces < 20) return
-
-          // Constraint 3: SMALL SIZE PROTECTION
-          let isLimitedByFill = false
-          if (targetLayers < 50) {
-            const coreInGroup = group.filter(s => globalDemand[s] >= BIG_DEMAND_THRESHOLD)
-            const fillInGroup = group.filter(s => globalDemand[s] < BIG_DEMAND_THRESHOLD)
-            if (coreInGroup.length > 0 && fillInGroup.length > 0) {
-              let maxCoreLayers = Infinity
-              coreInGroup.forEach(s => {
-                maxCoreLayers = Math.min(maxCoreLayers, Math.floor(globalDemand[s] / (ratio[s] || 1)))
-              })
-              // If core size can go much deeper alone (+25 layers), reject this mixed cut
-              if (maxCoreLayers > targetLayers + 25) isLimitedByFill = true
-            }
+          if (priorityCandidates.length > 0) {
+            finalCandidates = priorityCandidates
+            selectionReason = 'Priority (80L)'
+          } else if (deepSingleCandidates.length > 0) {
+            finalCandidates = deepSingleCandidates
+            selectionReason = 'Deep Single Lock'
           }
-          if (isLimitedByFill) return // Reject
 
-          candidates.push({
-            group, ratio, markerLen, targetLayers, totalPieces
-          })
-        })
+          // SCORING
+          let best = null
+          let maxScore = -Infinity
 
-        if (candidates.length === 0) break
+          finalCandidates.forEach(cand => {
+            const currentCutsEst = Math.ceil(totalColorDemand / IDEAL_PIECES_PER_CUT)
 
-        // C. SELECTION LOGIC (Global Optimum)
+            let remainingAfter = 0
+            Object.entries(colorDemand).forEach(([s, qty]) => {
+              const used = (cand.ratio[s] || 0) * cand.targetLayers
+              remainingAfter += Math.max(0, qty - used)
+            })
+            const futureCutsEst = Math.ceil(remainingAfter / IDEAL_PIECES_PER_CUT)
+            const cutsSaved = currentCutsEst - futureCutsEst
 
-        // Constraint 2: PRIORITY LOCK (80 Layers)
-        const priorityCandidates = candidates.filter(c => c.targetLayers >= HARD_CAP)
+            const layerRatio = cand.targetLayers / HARD_CAP
+            const depthScore = Math.pow(layerRatio, 3) * 5000
+            const shallowPenalty = (cand.targetLayers < 40) ? 3000 : 0
 
-        // Constraint 4: SAME-SIZE LOCK (Deep Single Cuts)
-        const deepSingleCandidates = candidates.filter(c =>
-          Object.keys(c.ratio).length === 1 && c.targetLayers >= DEEP_CUT_THRESHOLD
-        )
-
-        let finalCandidates = candidates
-        let selectionReason = 'Standard'
-
-        if (priorityCandidates.length > 0) {
-          finalCandidates = priorityCandidates
-          selectionReason = 'Priority (80L)'
-        } else if (deepSingleCandidates.length > 0) {
-          finalCandidates = deepSingleCandidates
-          selectionReason = 'Deep Single Lock'
-        }
-
-        // SCORING
-        let best = null
-        let maxScore = -Infinity
-
-        finalCandidates.forEach(cand => {
-          // Constraint 1: CUTS SAVED (Metric)
-          const currentCutsEst = Math.ceil(totalRemainingQty / IDEAL_PIECES_PER_CUT)
-
-          let remainingAfter = 0
-          Object.entries(globalDemand).forEach(([s, qty]) => {
-            const used = (cand.ratio[s] || 0) * cand.targetLayers
-            remainingAfter += Math.max(0, qty - used)
-          })
-          const futureCutsEst = Math.ceil(remainingAfter / IDEAL_PIECES_PER_CUT)
-
-          const cutsSaved = currentCutsEst - futureCutsEst
-
-          // SCORE - REFINED FOR CUT MINIMIZATION
-          // Primary: CutsSaved (Huge weight)
-          // Secondary: Layer Depth Ratio (We want DEEP cuts, not just many pieces)
-          // Penalty: Shallow cuts (< 40 layers) get massive penalty in comparison
-
-          const layerRatio = cand.targetLayers / HARD_CAP // 0.0 to 1.0
-          const depthScore = Math.pow(layerRatio, 3) * 5000 // Exponential reward for max depth
-
-          // Massive penalty for cuts < 40 layers if we have other options
-          const shallowPenalty = (cand.targetLayers < 40) ? 5000 : 0
-
-          // Constraint 6: LOOK-AHEAD (Fragment Penalty)
-          let fragmentPenalty = 0
-          Object.entries(cand.ratio).forEach(([s, r]) => {
-            const remaining = (globalDemand[s] || 0) - (cand.targetLayers * r)
-            if (remaining > 0 && remaining < 20) fragmentPenalty += 2000
-          })
-
-          const score = (cutsSaved * 10000)      // Highest Priority
-            + depthScore               // Reward 80 layers significantly
-            + (cand.totalPieces * 0.5) // Minor tie-breaker
-            - shallowPenalty           // Avoid 20-30 layer cuts if possible
-            - fragmentPenalty
-
-          if (score > maxScore) {
-            maxScore = score
-            best = { ...cand, score, selectionReason }
-          }
-        })
-
-        if (!best) break
-
-        // D. EXECUTE (Greedy Layer Allocation to Colors)
-
-        const colorAllocations = {}
-        Object.keys(currentDemands).forEach(color => {
-          colorAllocations[color] = { layers: 0 }
-        })
-
-        let remainingLayers = best.targetLayers
-
-        // Distribute layers to colors
-        while (remainingLayers > 0) {
-          let bestColor = null
-          let maxNeedScore = -1
-
-          Object.entries(currentDemands).forEach(([color, demandMap]) => {
-            let absorption = 0
-            let pendingTotal = 0
-            Object.entries(best.ratio).forEach(([sz, r]) => {
-              const need = demandMap[sz] || 0
-              if (need > 0) absorption += Math.min(need, r)
-              pendingTotal += need
+            let fragmentPenalty = 0
+            Object.entries(cand.ratio).forEach(([s, r]) => {
+              const remaining = (colorDemand[s] || 0) - (cand.targetLayers * r)
+              if (remaining > 0 && remaining < 20) fragmentPenalty += 2000
             })
 
-            if (absorption > 0) {
-              const score = (absorption * 1000) + pendingTotal
-              if (score > maxNeedScore) {
-                maxNeedScore = score
-                bestColor = color
-              }
+            const score = (cutsSaved * 10000) + depthScore + (cand.totalPieces * 0.5) - shallowPenalty - fragmentPenalty
+
+            if (score > maxScore) {
+              maxScore = score
+              best = { ...cand, score, selectionReason }
             }
           })
 
-          if (!bestColor) {
-            let maxGeneric = -1
-            Object.entries(currentDemands).forEach(([color, demandMap]) => {
-              const total = Object.values(demandMap).reduce((a, b) => a + b, 0)
-              if (total > maxGeneric) { maxGeneric = total; bestColor = color }
-            })
-          }
+          if (!best) break
 
-          if (bestColor) {
-            colorAllocations[bestColor].layers += 1
-            remainingLayers--
-            Object.entries(best.ratio).forEach(([sz, r]) => {
-              currentDemands[bestColor][sz] = (currentDemands[bestColor][sz] || 0) - r
-            })
-          } else {
-            break
-          }
-        }
+          // EXECUTE: Cut for this color from this lot
+          const layers = best.targetLayers
+          const producedQuantities = {}
 
-        const planRows = []
-        Object.entries(colorAllocations).forEach(([color, data]) => {
-          if (data.layers > 0) {
-            const rowQuantities = {}
-            Object.entries(best.ratio).forEach(([sz, ratio]) => {
-              rowQuantities[sz] = data.layers * ratio
-            })
+          Object.entries(best.ratio).forEach(([sz, r]) => {
+            const qty = layers * r
+            producedQuantities[sz] = qty
+            colorDemand[sz] = Math.max(0, (colorDemand[sz] || 0) - qty)
+          })
 
-            planRows.push({
-              colors: color,
-              layers: data.layers,
-              quantities: rowQuantities
-            })
-          }
-        })
+          const usedMetraj = layers * best.markerLen
+          lotMetraj -= usedMetraj
+          lotGroup.totalMetraj -= usedMetraj // Update the actual lot
 
-        if (planRows.length > 0) {
           plans.push({
             id: cutNo++,
             shrinkage: `${lotGroup.mold} | LOT: ${lotGroup.lot}`,
             lot: lotGroup.lot,
             mold: lotGroup.mold,
-            totalLayers: best.targetLayers,
+            totalLayers: layers,
             markerRatio: best.ratio,
             markerLength: best.markerLen.toFixed(2),
-            rows: planRows,
+            rows: [{
+              colors: color,
+              layers: layers,
+              quantities: producedQuantities
+            }],
             fabrics: lotGroup.fabrics.map(f => f.topNo).join(', '),
-            note: `Reason: ${best.selectionReason} | Saved: ${Math.floor(best.score / 3000)}`
+            note: `Color: ${color} | ${best.selectionReason}`
           })
-
-          lotMetraj -= (best.targetLayers * best.markerLen)
-        } else {
-          break
         }
-      }
+      })
     })
 
     console.log('✅ Scoring Engine Sonuçları:', plans)

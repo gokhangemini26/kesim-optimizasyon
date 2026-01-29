@@ -1,7 +1,7 @@
 
 export const runWaterfallOptimization = (data) => {
     const { orderRows, groupingResults, avgConsumption, consumptionMode, sizeConsumptions } = data
-    if (!groupingResults) return []
+    if (!groupingResults) return { plans: [], integrityMap: {} }
 
     // 1. Deep Copy & Flatten Lots
     const allLots = []
@@ -88,111 +88,122 @@ export const runWaterfallOptimization = (data) => {
         }
     })
 
-    // 4. Marker Efficiency & Plan Generation
-    // Now we have "Buckets" of orders in each Lot. We need to convert them into actual Cut Plans (Pastals).
-    // The prompt says: "Re-optimize accumulated orders within each lot".
-    // "If too small for efficient marker -> Manual Review or merge".
-
+    // 4. Marker Efficiency & Plan Generation (UPDATED FOR MULTI-SIZE)
     const finalPlans = []
     let cutIdCounter = 1
 
     allLots.forEach(lot => {
         if (lot.assignedOrders.length === 0) return
 
-        // Group by Size/Color to combine identicals if any (though logic above likely kept them separate)
-        // But we want to combine DIFFERENT sizes into markers to maximize efficiency (Simulated)
-        // The prompt asks for "Marker Efficiency". 
-        // "Lot A has S:10, M:50, L:20".
-        // We need to create markers like "S+M+L" to reach high plies (efficiency).
-        // Since we already "reserved" the metraj based on SINGLE usage, we have enough fabric.
-        // Combining them actually SAVES fabric usually (or is neutral).
-        // We will generate simple "Same Size" markers effectively because the "Waterfall" logic 
-        // locks specific quantities. 
-        // Wait, if we allocated based on "Single Marker Length", we assumed 100% usage.
-        // If we combine S and L, the length is (S_len + L_len). 
-        // 10 S + 10 L. 
-        // Separate: 10 * S_len + 10 * L_len.
-        // Combined: 10 * (S_len + L_len). 
-        // It is mathematically identical in terms of length consumption.
-        // So we can just output the assigned orders as simple markers or try to group them for display.
-        // "Optimization Rule: If remaining < efficient marker -> Manual Approval".
-
-        // Let's group by Size first
-        const lotInventory = {}
+        // 1. Group by Color
+        const colorGroups = {}
         lot.assignedOrders.forEach(ord => {
-            const key = `${ord.size}`
-            if (!lotInventory[key]) lotInventory[key] = []
-            lotInventory[key].push(ord)
+            if (!colorGroups[ord.color]) colorGroups[ord.color] = []
+            colorGroups[ord.color].push(ord)
         })
 
-        // Simple Output Strategy: One Plan per Color/Size group? 
-        // Or try to merge? 
-        // The Prompt Step 4 says: "Asorti ve Pastal Verimliliği". 
-        // IF we have S:10, M:50. 
-        // Maybe M:50 can be 50 layers of M. 
-        // S:10 is small. 10 layers of S. 
-        // If we combine? 10 layers of (S+M). Then 40 layers of M.
-        // This is better for cutting (fewer cuts).
-        // So yes, we should try to Merge.
-
-        // Merge Logic:
-        // 1. Flatten lot orders into a work list: [{size, color, qty}]
-        let workList = JSON.parse(JSON.stringify(lot.assignedOrders)) // Deep copy
-
-        // Sort by Qty Ascending? Or Descending?
-        // We want to combine "Small" things into "Big" things.
-        // Greedily combine small counts with larger ones.
-
-        // Optimization Loop for this Lot
-        while (workList.length > 0) {
-            // Take first item
-            const current = workList[0]
-
-            // Try to find partners to form a mix (S+M+L) with SAME layer count if possible
-            // Or "consuming" the layer count.
-            // This is a "Cutting Stock Problem" substep. 
-            // Simplification: We will just group by Color if possible, or Size. 
-            // Given the complexity constraints, let's stick to:
-            // - High qty items (>30) -> Cut alone (Efficient enough)
-            // - Low qty items (<30) -> Try to find a partner to piggyback.
-
-            // For now, to ensure robustness and output, we will output them as is but flag "Low Efficiency" in notes.
-            // Refinement: Group by ID.
-
-            const planId = cutIdCounter++
-
-            finalPlans.push({
-                id: planId,
-                shrinkage: `${lot.mold} | LOT: ${lot.lot}`,
-                lot: lot.lot,
-                mold: lot.mold,
-                totalLayers: current.qty,
-                markerRatio: { [current.size]: 1 },
-                markerLength: current.markerLen.toFixed(2),
-                rows: [{
-                    colors: current.color,
-                    layers: current.qty,
-                    quantities: { [current.size]: current.qty }
-                }],
-                fabrics: lot.fabrics.map(f => f.topNo).join(', '),
-                note: `Waterfall Alloc: ${current.size} x ${current.qty}`
+        // 2. Process each color group
+        Object.entries(colorGroups).forEach(([color, orders]) => {
+            // Aggregate orders by size to handle multiple partial allocations for same size
+            const sizePool = {}
+            orders.forEach(o => {
+                if (!sizePool[o.size]) sizePool[o.size] = { qty: 0, markerLen: o.markerLen }
+                sizePool[o.size].qty += o.qty
             })
 
-            workList.shift()
-        }
+            // Create working list of sizes
+            let workSizes = Object.entries(sizePool).map(([size, data]) => ({
+                size,
+                qty: data.qty,
+                markerLen: data.markerLen
+            }))
+
+            // Sort sizes to mix Small & Large:
+            // S, M, L, XL -> We want S+XL, M+L logic to balance marker
+            // Sort standard alphanumeric (matches user expectation roughly)
+            workSizes.sort((a, b) => String(a.size).localeCompare(String(b.size), undefined, { numeric: true }))
+
+            while (workSizes.length > 0) {
+                // Strategy: Pick up to 4 sizes.
+                // Try to take 1 from Start (Small), 1 from End (Large), Repeat.
+                // This creates a "Mix" marker.
+
+                const selected = []
+                const indicesToRemove = []
+
+                // Helper to pick
+                const pickIndex = (idx) => {
+                    if (idx >= 0 && idx < workSizes.length && !indicesToRemove.includes(idx)) {
+                        selected.push(workSizes[idx])
+                        indicesToRemove.push(idx)
+                        return true
+                    }
+                    return false
+                }
+
+                // Pick 1: Smallest
+                pickIndex(0)
+                // Pick 2: Largest (if diff)
+                if (workSizes.length > 1) pickIndex(workSizes.length - 1)
+                // Pick 3: 2nd Smallest (if valid)
+                if (workSizes.length > 2) pickIndex(1)
+                // Pick 4: 2nd Largest (if valid)
+                if (workSizes.length > 3) pickIndex(workSizes.length - 2)
+
+                // Now we have 'selected' list of up to 4 items.
+                // Determine Layer Count: Min(qty) of selected, but capped at 80 (HARD_CAP)
+                const minQty = Math.min(...selected.map(s => s.qty))
+                const layers = Math.min(minQty, 80)
+
+                // Calculate Marker Stats
+                let totalMarkerLen = 0
+                const markerRatio = {}
+                const rowQuantities = {}
+
+                selected.forEach(s => {
+                    totalMarkerLen += s.markerLen
+                    markerRatio[s.size] = 1 // Ratio 1 for each
+                    rowQuantities[s.size] = layers
+                })
+
+                // Create Plan
+                finalPlans.push({
+                    id: cutIdCounter++,
+                    shrinkage: `${lot.mold} | LOT: ${lot.lot}`,
+                    lot: lot.lot,
+                    mold: lot.mold,
+                    totalLayers: layers,
+                    markerRatio: markerRatio,
+                    markerLength: totalMarkerLen.toFixed(2),
+                    rows: [{
+                        colors: color,
+                        layers: layers,
+                        quantities: rowQuantities
+                    }],
+                    fabrics: lot.fabrics.map(f => f.topNo).join(', '),
+                    note: `Multi-Size: ${selected.map(s => s.size).join('+')} (${layers} L)`
+                })
+
+                // Update Remaining Quantities in Work Pool
+                // We just decrement. If qty becomes 0, we remove from queue.
+                selected.forEach(s => {
+                    // Update the object in workSizes directly (since selected contains refs)
+                    s.qty -= layers
+                })
+
+                // Remove finished sizes
+                workSizes = workSizes.filter(s => s.qty > 0)
+            }
+        })
     })
 
     // UPDATE UI WITH INTEGRITY SCORES
-    // We need to pass back the "demandQueue" analysis or attach it to summary.
-    // The "summary" object is created in App.jsx usually. We can return a helper structure.
-
-    // Integrity Map: { "Color-Size": Score }
     const integrityMap = {}
     demandQueue.forEach(d => {
         const key = `${d.color}-${d.size}`
         const primaryAlloc = d.allocations.sort((a, b) => b.qty - a.qty)[0]
         const primeQty = primaryAlloc ? primaryAlloc.qty : 0
-        const score = (primeQty / d.totalQty) * 100
+        const score = d.totalQty > 0 ? (primeQty / d.totalQty) * 100 : 100
         integrityMap[key] = {
             score: score.toFixed(0),
             allocations: d.allocations

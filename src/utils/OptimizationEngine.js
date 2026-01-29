@@ -151,9 +151,25 @@ export const runWaterfallOptimization = (data) => {
                 if (workSizes.length > 3) pickIndex(workSizes.length - 2)
 
                 // Now we have 'selected' list of up to 4 items.
-                // Determine Layer Count: Min(qty) of selected, but capped at 80 (HARD_CAP)
+                // Determine Layer Count
                 const minQty = Math.min(...selected.map(s => s.qty))
-                const layers = Math.min(minQty, 80)
+                const maxQty = Math.max(...selected.map(s => s.qty))
+
+                // SMART MERGE LOGIC:
+                // If the difference is small (e.g. <= 8 layers), just do the MAX to avoid a tiny remnant cut.
+                // Unless MAX > HARD_CAP (80), then we are limited by the table anyway.
+
+                let layers = minQty
+                const REMNANT_TOLERANCE = 8
+
+                console.log(`[SmartMerge] Checking: Sizes=[${selected.map(s => s.size).join(',')}], Qty=[${selected.map(s => s.qty).join(',')}], Min=${minQty}, Max=${maxQty}, Diff=${maxQty - minQty}`)
+
+                if (maxQty <= 80 && (maxQty - minQty) <= REMNANT_TOLERANCE) {
+                    console.log(`[SmartMerge] MERGING! Upgrading layers to ${maxQty}`)
+                    layers = maxQty // All selected sizes get cleared! (Some overproduction)
+                } else {
+                    layers = Math.min(minQty, 80) // Capped standard logic
+                }
 
                 // Calculate Marker Stats
                 let totalMarkerLen = 0

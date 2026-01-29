@@ -9,9 +9,9 @@ export const runWaterfallOptimization = (data) => {
         group.forEach(g => {
             allLots.push({
                 ...g,
-                currentMetraj: g.totalMetraj, // Working copy of metraj
+                currentMetraj: g.totalMetraj,
                 mold: moldName,
-                assignedOrders: [] // Bucket for orders: { color, size, qty }
+                assignedOrders: [] // { color, size, qty, markerLen }
             })
         })
     }
@@ -19,7 +19,7 @@ export const runWaterfallOptimization = (data) => {
     processGroup(groupingResults.kalip2, 'KALIP - 2 (3.1-6%)')
     processGroup(groupingResults.kalip3, 'KALIP - 3 (6.1-9%)')
 
-    // 2. Prepare & Sort Demand
+    // 2. Initial Allocation (Waterfall) - Same as before to distribute total quantity to lots
     let demandQueue = []
     orderRows.forEach(row => {
         Object.entries(row.quantities).forEach(([size, qty]) => {
@@ -31,158 +31,185 @@ export const runWaterfallOptimization = (data) => {
                     size: size,
                     totalQty: q,
                     remainingQty: q,
-                    allocations: [] // { lotId, qty } to track integrity
+                    allocations: []
                 })
             }
         })
     })
-    // Sort: Largest Demand First
     demandQueue.sort((a, b) => b.totalQty - a.totalQty)
-
-    // Sort Lots: Largest Supply First
     allLots.sort((a, b) => b.currentMetraj - a.currentMetraj)
 
     const calcLen = (s) => (consumptionMode === 'SIZE' ? parseFloat(sizeConsumptions[s]) : 0) || avgConsumption
 
-    // 3. Allocation Loop
     demandQueue.forEach(item => {
         while (item.remainingQty > 0) {
-            // Find Candidate Lots
-            // Preference 1: Fits COMPLETELY (Scenario A)
             let candidateLot = allLots.find(lot => {
                 if (lot.currentMetraj <= 0) return false
                 const markerLen = calcLen(item.size)
                 const maxCap = Math.floor(lot.currentMetraj / markerLen)
                 return maxCap >= item.remainingQty
             })
-
-            // Preference 2: If no complete fit, find Largest Available (Scenario B)
             if (!candidateLot) {
-                // Find lot with MAX current metraj
                 candidateLot = allLots.reduce((max, lot) => lot.currentMetraj > (max?.currentMetraj || 0) ? lot : max, null)
             }
+            if (!candidateLot || candidateLot.currentMetraj <= 0) break
 
-            if (!candidateLot || candidateLot.currentMetraj <= 0) {
-                // No fabric left at all anywhere
-                break
-            }
-
-            // Execute Cut for this step
             const markerLen = calcLen(item.size)
             const maxLotCap = Math.floor(candidateLot.currentMetraj / markerLen)
             const qtyToCut = Math.min(item.remainingQty, maxLotCap)
+            if (qtyToCut <= 0) break
 
-            if (qtyToCut <= 0) break // Should not happen if metraj > 0 but safety
-
-            // Assign
             candidateLot.assignedOrders.push({
                 color: item.color,
                 size: item.size,
                 qty: qtyToCut,
-                markerLen: markerLen
+                markerLen: markerLen,
+                originalId: item.id
             })
-
             candidateLot.currentMetraj -= (qtyToCut * markerLen)
             item.remainingQty -= qtyToCut
             item.allocations.push({ lot: candidateLot.lot, qty: qtyToCut })
         }
     })
 
-    // 4. Marker Efficiency & Plan Generation (UPDATED FOR MULTI-SIZE)
+    // 3. ADVANCED MARKER EFFICIENCY (New Logic)
     const finalPlans = []
     let cutIdCounter = 1
 
     allLots.forEach(lot => {
         if (lot.assignedOrders.length === 0) return
 
-        // 1. Group by Color
-        const colorGroups = {}
+        // A. Aggregate Demand by Size (across all colors in this Lot)
+        // Map: Size -> { totalQty: number, orders: [{color, qty}] }
+        const sizeDemand = {}
+
         lot.assignedOrders.forEach(ord => {
-            if (!colorGroups[ord.color]) colorGroups[ord.color] = []
-            colorGroups[ord.color].push(ord)
+            if (!sizeDemand[ord.size]) sizeDemand[ord.size] = { totalQty: 0, markerLen: ord.markerLen, orders: [] }
+            sizeDemand[ord.size].totalQty += ord.qty
+            sizeDemand[ord.size].orders.push(ord)
         })
 
-        // 2. Process each color group
-        Object.entries(colorGroups).forEach(([color, orders]) => {
-            // Aggregate orders by size to handle multiple partial allocations for same size
-            const sizePool = {}
-            orders.forEach(o => {
-                if (!sizePool[o.size]) sizePool[o.size] = { qty: 0, markerLen: o.markerLen }
-                sizePool[o.size].qty += o.qty
-            })
+        // B. Optimization Strategy: "Aggregate Block" Planning
+        // We want to clear the 'totalQty' using high-ratio markers.
+        // E.g. Size 32 Total: 150.
+        // Try Ratio 4 (32/32/32/32) -> 150 / 4 = 37.5. Layers = 38 (Overproduced 152).
 
-            // Create working list of sizes
-            let workSizes = Object.entries(sizePool).map(([size, data]) => ({
-                size,
-                qty: data.qty,
-                markerLen: data.markerLen
-            }))
 
-            // Sort sizes to mix Small & Large:
-            // S, M, L, XL -> We want S+XL, M+L logic to balance marker
-            // Sort standard alphanumeric (matches user expectation roughly)
-            workSizes.sort((a, b) => String(a.size).localeCompare(String(b.size), undefined, { numeric: true }))
 
-            while (workSizes.length > 0) {
-                // Strategy: Pick up to 4 sizes.
-                // Try to take 1 from Start (Small), 1 from End (Large), Repeat.
-                // This creates a "Mix" marker.
+        Object.keys(sizeDemand).sort().forEach(size => { // Process sizes
+            const data = sizeDemand[size]
+            let qtyNeeded = data.totalQty
 
-                const selected = []
-                const indicesToRemove = []
+            // Try High Ratios Descending (4, 3, 2, 1)
+            // Limit: Max 80 Layers.
+            // Loop until qty is small
 
-                // Helper to pick
-                const pickIndex = (idx) => {
-                    if (idx >= 0 && idx < workSizes.length && !indicesToRemove.includes(idx)) {
-                        selected.push(workSizes[idx])
-                        indicesToRemove.push(idx)
-                        return true
+            while (qtyNeeded > 0) {
+                // Determine Best Ratio
+                // We want to maximize Ratio * Layers <= 80 * Ratio? No.
+                // We want to maximize Pieces per Cut (Efficiency). 
+                // Max Layers = 80.
+                // Max Pieces per Cut = 80 * Ratio.
+                // If we have 500 pieces. 
+                // Ratio 4: 125 layers (Too high). Cap at 80. -> 320 pieces.
+                // Ratio 6: 83 layers (Too high). Cap at 80 -> 480 pieces.
+
+                // Heuristic: Try largest ratio (up to 6?) that fills at least 10 layers?
+                // Or just standard greedy: Try Ratio X that clears remaining demand in 1 cut defined by max layers.
+
+                // Let's iterate Ratios 6 down to 1.
+                let bestMove = null
+
+                for (let r = 8; r >= 1; r--) {
+                    // How many layers needed?
+                    let layers = Math.ceil(qtyNeeded / r)
+
+                    if (layers > 80) layers = 80 // Cap
+
+                    const pieces = layers * r
+
+                    // Score = Pieces cleared.
+                    // Prefer Higher Ratio if pieces are similar.
+                    if (!bestMove || pieces > bestMove.pieces) {
+                        bestMove = { ratio: r, layers, pieces }
                     }
-                    return false
                 }
 
-                // Pick 1: Smallest
-                pickIndex(0)
-                // Pick 2: Largest (if diff)
-                if (workSizes.length > 1) pickIndex(workSizes.length - 1)
-                // Pick 3: 2nd Smallest (if valid)
-                if (workSizes.length > 2) pickIndex(1)
-                // Pick 4: 2nd Largest (if valid)
-                if (workSizes.length > 3) pickIndex(workSizes.length - 2)
+                // Check if this move is "Efficient". 
+                // If we only need 5 pieces. Ratio 8 -> 1 layer -> 8 pieces. Overproduction 3. Fine.
+                // If we need 5 pieces. Ratio 1 -> 5 layers -> 5 pieces. Exact.
+                // User prefers "Fewer Cuts". So Ratio 8 is actually better (1 cut vs 1 cut, but 1 layer vs 5).
+                // Actually fewer layers is faster? No, fewer cuts (pastal) is key.
+                // But generally we want to fill the table (High Layers).
+                // Let's stick to High Ratio if Layers >= 10.
+                // If Layers < 10, maybe check if a lower ratio gives more layers?
+                // Example: Need 40. 
+                // Ratio 4 -> 10 Layers. (Good)
+                // Ratio 1 -> 40 Layers. (Better? Density is higher).
 
-                // Now we have 'selected' list of up to 4 items.
-                // Determine Layer Count
-                const minQty = Math.min(...selected.map(s => s.qty))
-                const maxQty = Math.max(...selected.map(s => s.qty))
+                // Revised Strategy:
+                // Prioritize HIGH LAYERS (approx 40-80).
+                // Find a Ratio R such that Qty / R ~= 80.
+                // Ideal Ratio = Qty / 80.
+                // If Qty = 320. 320/80 = 4. Use Ratio 4.
+                // If Qty = 100. 100/80 = 1.25. Use Ratio 1 (100 lay) or 2 (50 lay).
 
-                // SMART MERGE LOGIC:
-                // If the difference is small (e.g. <= 8 layers), just do the MAX to avoid a tiny remnant cut.
-                // Unless MAX > HARD_CAP (80), then we are limited by the table anyway.
+                let targetRatio = Math.round(qtyNeeded / 70) // Aim for 70 layers
+                if (targetRatio < 1) targetRatio = 1
+                if (targetRatio > 6) targetRatio = 6 // Cap ratio
 
-                let layers = minQty
-                const REMNANT_TOLERANCE = 8
+                // Now calculate actuals
+                let layers = Math.ceil(qtyNeeded / targetRatio)
+                if (layers > 80) layers = 80
 
-                console.log(`[SmartMerge] Checking: Sizes=[${selected.map(s => s.size).join(',')}], Qty=[${selected.map(s => s.qty).join(',')}], Min=${minQty}, Max=${maxQty}, Diff=${maxQty - minQty}`)
+                const produced = layers * targetRatio
 
-                if (maxQty <= 80 && (maxQty - minQty) <= REMNANT_TOLERANCE) {
-                    console.log(`[SmartMerge] MERGING! Upgrading layers to ${maxQty}`)
-                    layers = maxQty // All selected sizes get cleared! (Some overproduction)
-                } else {
-                    layers = Math.min(minQty, 80) // Capped standard logic
-                }
+                // If this is a very small remnant (e.g. 5 pieces), defer to "Leftovers" logic?
+                // Or just cut it.
+                // Let's just create the plan.
 
-                // Calculate Marker Stats
-                let totalMarkerLen = 0
-                const markerRatio = {}
-                const rowQuantities = {}
 
-                selected.forEach(s => {
-                    totalMarkerLen += s.markerLen
-                    markerRatio[s.size] = 1 // Ratio 1 for each
-                    rowQuantities[s.size] = layers
+
+                // Sort orders by size demand (Largest first to receive)
+                data.orders.sort((a, b) => b.qty - a.qty)
+
+                let layersToDist = layers
+                const realPlanRows = []
+
+                data.orders.forEach(ord => {
+                    if (layersToDist <= 0) return
+                    // How many layers can this order absorb?
+                    // Need: ord.qty. One layer gives: targetRatio.
+                    // LayersNeeded = ceil(ord.qty / targetRatio).
+                    let lay = Math.min(layersToDist, Math.ceil(ord.qty / targetRatio))
+                    if (lay > 0) {
+                        realPlanRows.push({
+                            colors: ord.color,
+                            layers: lay,
+                            quantities: { [size]: lay * targetRatio } // Display total pieces or ratio? Standard UI shows Ratio? NO, UI shows Qty.
+                        })
+                        ord.qty -= (lay * targetRatio) // update demand
+                        layersToDist -= lay
+                    }
                 })
 
-                // Create Plan
+                // If layers remaining (Overproduction)
+                if (layersToDist > 0 && realPlanRows.length > 0) {
+                    realPlanRows[0].layers += layersToDist
+                    realPlanRows[0].quantities[size] += (layersToDist * targetRatio)
+                } else if (layersToDist > 0) {
+                    // assigned to first
+                    if (data.orders.length > 0) {
+                        realPlanRows.push({
+                            colors: data.orders[0].color,
+                            layers: layersToDist,
+                            quantities: { [size]: layersToDist * targetRatio }
+                        })
+                    }
+                }
+
+                const markerRatio = { [size]: targetRatio }
+
                 finalPlans.push({
                     id: cutIdCounter++,
                     shrinkage: `${lot.mold} | LOT: ${lot.lot}`,
@@ -190,25 +217,13 @@ export const runWaterfallOptimization = (data) => {
                     mold: lot.mold,
                     totalLayers: layers,
                     markerRatio: markerRatio,
-                    markerLength: totalMarkerLen.toFixed(2),
-                    rows: [{
-                        colors: color,
-                        layers: layers,
-                        quantities: rowQuantities
-                    }],
+                    markerLength: (data.markerLen * targetRatio).toFixed(2), // Approx
+                    rows: realPlanRows,
                     fabrics: lot.fabrics.map(f => f.topNo).join(', '),
-                    note: `Multi-Size: ${selected.map(s => s.size).join('+')} (${layers} L)`
+                    note: `Block: ${size} (x${targetRatio})`
                 })
 
-                // Update Remaining Quantities in Work Pool
-                // We just decrement. If qty becomes 0, we remove from queue.
-                selected.forEach(s => {
-                    // Update the object in workSizes directly (since selected contains refs)
-                    s.qty -= layers
-                })
-
-                // Remove finished sizes
-                workSizes = workSizes.filter(s => s.qty > 0)
+                qtyNeeded -= produced
             }
         })
     })
@@ -230,7 +245,6 @@ export const runWaterfallOptimization = (data) => {
 }
 
 export const generateSummary = (orderRows, plans, integrityMap) => {
-    // Re-use logic from App.jsx but enhanced
     const allSizesSet = new Set()
     orderRows.forEach(order => {
         Object.keys(order.quantities).forEach(sz => allSizesSet.add(sz))
@@ -257,7 +271,6 @@ export const generateSummary = (orderRows, plans, integrityMap) => {
                 })
             })
 
-            // Integrity
             integrity[sz] = integrityMap[`${order.color}-${sz}`] || { score: 100, allocations: [] }
         })
 

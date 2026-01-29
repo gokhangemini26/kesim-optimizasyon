@@ -88,9 +88,9 @@ export default function DataEntryContainer({
             const maxShrink = Math.max(Math.abs(parsed.en), Math.abs(parsed.boy))
 
             let targetGroup = 'kalip3'
-            if (maxShrink <= 5) targetGroup = 'kalip1'
-            else if (maxShrink <= 10) targetGroup = 'kalip2'
-            // 10'dan büyükse kalip3
+            if (maxShrink <= 3) targetGroup = 'kalip1'
+            else if (maxShrink <= 6.0) targetGroup = 'kalip2'
+            // 6.1 ve üzeri kalip3
 
             const lot = fabric.lot || 'BELİRSİZ'
 

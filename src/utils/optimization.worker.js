@@ -149,11 +149,11 @@ const enforceMinCutSize = (cuts, lots, orders) => {
         const job = cuts[i];
         const totalPieces = job.sizes.length * job.layers;
 
-        if (totalPieces < 20) {
+        if (totalPieces < 35) { // Updated to 35
             const lot = lots.find(l => l.id === job.lotId);
 
-            // Attempt 1: Grow (Add layers to reach 20)
-            const neededTotal = 20;
+            // Attempt 1: Grow (Add layers to reach 35)
+            const neededTotal = 35; // Updated to 35
             const piecesPerLayer = job.sizes.length;
             const targetLayers = Math.ceil(neededTotal / piecesPerLayer);
             const extraLayers = targetLayers - job.layers;

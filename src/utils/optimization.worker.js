@@ -179,7 +179,9 @@ self.onmessage = (e) => {
             if (groupingResults[k]) {
                 groupingResults[k].forEach(l => {
                     const shrinkName = k === 'kalip1' ? 'KALIP - 1' : k === 'kalip2' ? 'KALIP - 2' : 'KALIP - 3';
-                    lots.push(new FabricLot(l.lot, l, l.totalMetraj, shrinkName));
+                    // Create UNIQUE ID: LotCode + ShrinkName to avoid collisions
+                    const uniqueId = `${l.lot}_${k}`;
+                    lots.push(new FabricLot(uniqueId, l, l.totalMetraj, shrinkName));
                 });
             }
         });
@@ -367,8 +369,8 @@ self.onmessage = (e) => {
 
             finalPlans.push({
                 id: job.id,
-                shrinkage: `${lotObj.shrinkageGroup} | ${lotObj.id}`,
-                lot: lotObj.id,
+                shrinkage: `${lotObj.shrinkageGroup} | ${lotObj.details.lot || lotObj.id.split('_')[0]}`,
+                lot: lotObj.details.lot || lotObj.id.split('_')[0],
                 mold: lotObj.shrinkageGroup,
                 totalLayers: job.layers,
                 markerRatio: counts,

@@ -119,6 +119,39 @@ const findBestMarkerCombination = (lot, orderLinesForColor, params) => {
         variations.push(evaluateGroup(mix));
     }
 
+    // Variation C: Multi-Instance for Top Sizes (NEW)
+    // "Aynı bedeni, ayni kesim içinde 2 ya da 3 seferde kullanabilirsin"
+    if (sortedOrders.length > 0) {
+        const top1 = sortedOrders[0]; // Highest demand
+        // Try [S, S, S, S]
+        variations.push(evaluateGroup([top1, top1, top1, top1]));
+        // Try [S, S, S]
+        variations.push(evaluateGroup([top1, top1, top1]));
+        // Try [S, S]
+        variations.push(evaluateGroup([top1, top1]));
+
+        if (sortedOrders.length >= 2) {
+            const top2 = sortedOrders[1];
+            // Try [S, S, M, M]
+            variations.push(evaluateGroup([top1, top1, top2, top2]));
+            // Try [S, S, S, M]
+            variations.push(evaluateGroup([top1, top1, top1, top2]));
+            // Try [S, M, M, M]
+            variations.push(evaluateGroup([top1, top2, top2, top2]));
+            // Try [S, S, M]
+            variations.push(evaluateGroup([top1, top1, top2]));
+            // Try [S, M, M]
+            variations.push(evaluateGroup([top1, top2, top2]));
+        }
+
+        if (sortedOrders.length >= 3) {
+            const top2 = sortedOrders[1];
+            const top3 = sortedOrders[2];
+            // Try [S, S, M, L]
+            variations.push(evaluateGroup([top1, top1, top2, top3]));
+        }
+    }
+
     // Single Size fallback
     if (sortedOrders.length === 1) {
         const o = sortedOrders[0];

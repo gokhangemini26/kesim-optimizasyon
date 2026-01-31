@@ -316,8 +316,8 @@ export default function ResultsView({ plans, summary, onBack }) {
                                             <div className="text-xl font-black">ADET</div>
                                         </th>
                                         <th className="p-6 bg-slate-800">
-                                            <div className="text-[10px] font-bold text-slate-400 mb-1">BÜTÜNLÜK</div>
-                                            <div className="text-xl font-black">SKORU</div>
+                                            <div className="text-[10px] font-bold text-slate-400 mb-1">EKSİK</div>
+                                            <div className="text-xl font-black">ADET</div>
                                         </th>
                                     </tr>
                                 </thead>
@@ -327,14 +327,7 @@ export default function ResultsView({ plans, summary, onBack }) {
                                         const totalPlannedRow = Object.values(item.planned).reduce((a, b) => a + b, 0)
                                         const diffRow = totalPlannedRow - totalOriginal
 
-                                        // Calculate Average Integrity for the Color
-                                        let integritySum = 0
-                                        let integrityCount = 0
-                                        Object.values(item.integrity || {}).forEach(val => {
-                                            integritySum += parseInt(val.score || 0)
-                                            integrityCount++
-                                        })
-                                        const avgIntegrity = integrityCount > 0 ? Math.round(integritySum / integrityCount) : 100
+
 
                                         return (
                                             <tr key={idx} className="border-b border-slate-100 hover:bg-slate-50/50 transition-colors">
@@ -346,12 +339,7 @@ export default function ResultsView({ plans, summary, onBack }) {
                                                     const original = item.demanded[size] || 0
                                                     const planned = item.planned[size] || 0
                                                     const sDiff = planned - original
-                                                    const integrityObj = item.integrity?.[size] || { score: 100 }
-                                                    const integrityScore = parseInt(integrityObj.score)
 
-                                                    let integrityColor = 'bg-emerald-100 text-emerald-700'
-                                                    if (integrityScore < 100) integrityColor = 'bg-amber-100 text-amber-700'
-                                                    if (integrityScore < 50) integrityColor = 'bg-red-100 text-red-700'
 
                                                     return (
                                                         <td key={size} className="p-4 border-r border-slate-100">
@@ -365,9 +353,9 @@ export default function ResultsView({ plans, summary, onBack }) {
                                                                         {sDiff > 0 ? `+${sDiff}` : sDiff}
                                                                     </div>
                                                                 )}
-                                                                {original > 0 && (
-                                                                    <div className={`mt-2 text-[10px] font-black px-2 py-0.5 rounded-full ${integrityColor}`}>
-                                                                        %{integrityScore} Lotus
+                                                                {original > 0 && sDiff < 0 && (
+                                                                    <div className={`mt-2 text-[10px] font-black px-2 py-0.5 rounded-full bg-red-100 text-red-700`}>
+                                                                        Eksik: {Math.abs(sDiff)}
                                                                     </div>
                                                                 )}
                                                             </div>
@@ -385,8 +373,10 @@ export default function ResultsView({ plans, summary, onBack }) {
                                                 </td>
                                                 <td className="p-6 border-l border-slate-100">
                                                     <div className="flex flex-col items-center justify-center">
-                                                        <div className={`text-2xl font-black ${avgIntegrity === 100 ? 'text-emerald-500' : 'text-amber-500'}`}>%{avgIntegrity}</div>
-                                                        <div className="text-[10px] font-bold text-slate-400">GENEL BÜTÜNLÜK</div>
+                                                        <div className={`text-2xl font-black ${diffRow >= 0 ? 'text-gray-300' : 'text-red-600'}`}>
+                                                            {diffRow < 0 ? Math.abs(diffRow) : '-'}
+                                                        </div>
+                                                        <div className="text-[10px] font-bold text-slate-400">EKSİK</div>
                                                     </div>
                                                 </td>
                                             </tr>

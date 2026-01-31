@@ -7,7 +7,8 @@ import CustomerManagement from './components/customers/CustomerManagement'
 import DataEntryContainer from './components/data-entry/DataEntryContainer'
 import ResultsView from './components/optimization/ResultsView'
 import AdminDashboard from './components/admin/AdminDashboard'
-import { runWaterfallOptimization, generateSummary } from './utils/OptimizationEngine'
+import { generateSummary } from './utils/OptimizationEngine'
+import { solveCuttingStockGA } from './utils/OptimizationEngineGA'
 
 function App() {
   const [user, setUser] = useState(null)
@@ -15,6 +16,7 @@ function App() {
   const [selectedCustomer, setSelectedCustomer] = useState(null)
   const [results, setResults] = useState(null)
   const [optimizationSummary, setOptimizationSummary] = useState(null)
+  const [isOptimizing, setIsOptimizing] = useState(false)
   const navigate = useNavigate()
 
   // Lifted Data Entry States
@@ -80,58 +82,66 @@ function App() {
     const { orderRows, groupingResults } = data
     if (!groupingResults) { alert("Lütfen kumaşları gruplandırın!"); return; }
 
-    const { plans, integrityMap } = runWaterfallOptimization(data)
+    try {
+      setIsOptimizing(true)
 
-    console.log('✅ Scoring Engine Sonuçları:', plans)
+      // RUN GENETIC ALGORITHM IN WORKER
+      const { plans, integrityMap } = await solveCuttingStockGA(data)
 
-    // ✅ 12. ÖZET RAPOR OLUŞTUR
-    const summary = generateSummary(orderRows, plans, integrityMap)
+      console.log('✅ GA Engine Sonuçları:', plans)
 
-    // ✅ 13. LOGLAMA
-    if (user) {
-      const totalPlannedCount = summary.reduce((acc, row) =>
-        acc + Object.values(row.planned).reduce((a, b) => a + b, 0), 0
-      )
-      await supabase.from('logs').insert([{
-        user_id: user.id,
-        action: 'OPTIMIZATION_RUN',
-        details: {
-          plans_count: plans.length,
-          total_pieces: totalPlannedCount,
-          customer: selectedCustomer?.name,
-          extra_percentage: 0
-        }
-      }])
+      // ✅ 12. ÖZET RAPOR OLUŞTUR
+      const summary = generateSummary(orderRows, plans, integrityMap)
+
+      // ✅ 13. LOGLAMA
+      if (user) {
+        const totalPlannedCount = summary.reduce((acc, row) =>
+          acc + Object.values(row.planned).reduce((a, b) => a + b, 0), 0
+        )
+        await supabase.from('logs').insert([{
+          user_id: user.id,
+          action: 'OPTIMIZATION_RUN_GA',
+          details: {
+            plans_count: plans.length,
+            total_pieces: totalPlannedCount,
+            customer: selectedCustomer?.name,
+            extra_percentage: 0
+          }
+        }])
+      }
+
+      console.log('📊 Özet Rapor:', summary)
+
+      const totalInitialMetraj = [
+        ...groupingResults.kalip1,
+        ...groupingResults.kalip2,
+        ...groupingResults.kalip3
+      ].reduce((sum, lot) => sum + (lot.totalMetraj || 0), 0)
+
+      const totalUsedMetraj = plans.reduce((sum, plan) => {
+        return sum + (plan.totalLayers * parseFloat(plan.markerLength))
+      }, 0)
+      const totalRemainingMetraj = totalInitialMetraj - totalUsedMetraj
+
+      const metrajInfo = {
+        initial: totalInitialMetraj.toFixed(2),
+        used: totalUsedMetraj.toFixed(2),
+        remaining: totalRemainingMetraj.toFixed(2),
+        usagePercent: totalInitialMetraj > 0 ? ((totalUsedMetraj / totalInitialMetraj) * 100).toFixed(1) : 0
+      }
+
+      console.log('📏 Kumaş Kullanımı:', metrajInfo)
+
+      setResults(plans)
+      setOptimizationSummary({ summary, metrajInfo })
+      navigate('/results')
+
+    } catch (error) {
+      console.error("Optimization Error:", error)
+      alert("Optimizasyon sırasında bir hata oluştu: " + error.message)
+    } finally {
+      setIsOptimizing(false)
     }
-
-    console.log('📊 Özet Rapor:', summary)
-
-    // Calculate used metraj from plans
-    // Re-calculate initial from grouping results to be safe
-    const totalInitialMetraj = [
-      ...groupingResults.kalip1,
-      ...groupingResults.kalip2,
-      ...groupingResults.kalip3
-    ].reduce((sum, lot) => sum + (lot.totalMetraj || 0), 0)
-
-    const totalUsedMetraj = plans.reduce((sum, plan) => {
-      return sum + (plan.totalLayers * parseFloat(plan.markerLength))
-    }, 0)
-    const totalRemainingMetraj = totalInitialMetraj - totalUsedMetraj
-
-    // Create metraj info object
-    const metrajInfo = {
-      initial: totalInitialMetraj.toFixed(2),
-      used: totalUsedMetraj.toFixed(2),
-      remaining: totalRemainingMetraj.toFixed(2),
-      usagePercent: totalInitialMetraj > 0 ? ((totalUsedMetraj / totalInitialMetraj) * 100).toFixed(1) : 0
-    }
-
-    console.log('📏 Kumaş Kullanımı:', metrajInfo)
-
-    setResults(plans)
-    setOptimizationSummary({ summary, metrajInfo })
-    navigate('/results')
   }
 
   return (
@@ -157,7 +167,7 @@ function App() {
                 <button onClick={handleLogout} className="bg-red-50 hover:bg-red-100 text-red-600 font-bold px-5 py-2.5 rounded-xl transition-all border border-red-100">Çıkış Yap</button>
               </div>
             </header>
-            <DataEntryContainer customer={selectedCustomer} onPreparePlan={handlePreparePlan} orderRows={orderRows} setOrderRows={setOrderRows} fabricRows={fabricRows} setFabricRows={setFabricRows} consumptionMode={consumptionMode} setConsumptionMode={setConsumptionMode} avgConsumption={avgConsumption} setAvgConsumption={setAvgConsumption} sizeConsumptions={sizeConsumptions} setSizeConsumptions={setSizeConsumptions} sizeType={sizeType} setSizeType={setSizeType} groupingResults={groupingResults} setGroupingResults={setGroupingResults} />
+            <DataEntryContainer isOptimizing={isOptimizing} customer={selectedCustomer} onPreparePlan={handlePreparePlan} orderRows={orderRows} setOrderRows={setOrderRows} fabricRows={fabricRows} setFabricRows={setFabricRows} consumptionMode={consumptionMode} setConsumptionMode={setConsumptionMode} avgConsumption={avgConsumption} setAvgConsumption={setAvgConsumption} sizeConsumptions={sizeConsumptions} setSizeConsumptions={setSizeConsumptions} sizeType={sizeType} setSizeType={setSizeType} groupingResults={groupingResults} setGroupingResults={setGroupingResults} />
           </div>
         ) : <Navigate to="/" />} />
         <Route path="/results" element={results ? <ResultsView plans={results} summary={optimizationSummary} onBack={() => { setResults(null); setOptimizationSummary(null); navigate('/data-entry') }} /> : <Navigate to="/" />} />

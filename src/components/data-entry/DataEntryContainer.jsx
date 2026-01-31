@@ -61,7 +61,8 @@ export default function DataEntryContainer({
     sizeType,
     setSizeType,
     groupingResults,
-    setGroupingResults
+    setGroupingResults,
+    isOptimizing
 }) {
     const [showGrouping, setShowGrouping] = useState(false)
 
@@ -177,10 +178,11 @@ export default function DataEntryContainer({
 
             <div className="mt-12 flex justify-center">
                 <button
+                    disabled={isOptimizing}
                     onClick={() => onPreparePlan({ orderRows, groupingResults, consumptionMode, avgConsumption, sizeConsumptions })}
-                    className="bg-primary-600 hover:bg-primary-700 text-white font-black text-xl py-5 px-12 rounded-3xl shadow-2xl shadow-primary-200 transform transition-all hover:scale-105 active:scale-95"
+                    className={`bg-primary-600 hover:bg-primary-700 text-white font-black text-xl py-5 px-12 rounded-3xl shadow-2xl shadow-primary-200 transform transition-all ${isOptimizing ? 'opacity-50 cursor-wait' : 'hover:scale-105 active:scale-95'}`}
                 >
-                    KESİM PLANI HAZIRLA
+                    {isOptimizing ? 'HESAPLANIYOR...' : 'KESİM PLANI HAZIRLA'}
                 </button>
             </div>
 

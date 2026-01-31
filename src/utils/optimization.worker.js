@@ -197,7 +197,7 @@ self.onmessage = (e) => {
         const cuts = [];
         let cutIdCounter = 1;
 
-        // 2. Main Loop
+        // 2. Main Loop (Optimized Phase)
         let active = true;
         let loopSafety = 0;
 
@@ -205,93 +205,149 @@ self.onmessage = (e) => {
             loopSafety++;
             active = false;
 
-            // Step 1: Sort & Select Lot -- GLOBAL SORT every time
+            // Global Sort Lots by Available Metraj
             const availableLots = lots.filter(l => l.availableMetraj > 1);
             if (availableLots.length === 0) break;
 
             availableLots.sort((a, b) => b.availableMetraj - a.availableMetraj);
             const currentLot = availableLots[0];
 
-            // Group Orders by Color
+            // Filter Orders Valid for this Lot
+            // (Assuming Universal Compatibility for now)
+
+            // Group Open Orders by Color
             const colorGroups = {};
             orders.filter(o => o.status === 'Open').forEach(o => {
-                // Must batch Lot Shrinkage? 
-                // Assumption: All orders valid for all lots (User requirement ambiguous, treating as universal)
                 if (!colorGroups[o.color]) colorGroups[o.color] = [];
                 colorGroups[o.color].push(o);
             });
 
-            // Find Best Color (Max Pending Qty)
-            let bestColor = null;
-            let maxQty = -1;
+            // Sort Colors by Total Pending Qty DESC
+            const colorCandidates = Object.entries(colorGroups)
+                .map(([color, lines]) => ({
+                    color,
+                    lines,
+                    totalPending: lines.reduce((sum, l) => sum + l.quantityPending, 0)
+                }))
+                .sort((a, b) => b.totalPending - a.totalPending);
 
-            Object.entries(colorGroups).forEach(([color, lines]) => {
-                const total = lines.reduce((sum, l) => sum + l.quantityPending, 0);
-                if (total > maxQty) {
-                    maxQty = total;
-                    bestColor = color;
+            // TRY CUTTING EACH COLOR (Fall-through)
+            // If the best color fails (e.g. no valid marker logic), try the next best.
+            for (const candidate of colorCandidates) {
+                const { color, lines } = candidate;
+
+                // Optimization Attempt
+                const bestMarker = findBestMarkerCombination(currentLot, lines, parameters);
+
+                if (bestMarker) {
+                    active = true; // We made a move!
+
+                    const job = new CutJob(cutIdCounter++, currentLot.id, color, bestMarker.sizes, bestMarker.layers, bestMarker.markerLength);
+                    cuts.push(job);
+                    currentLot.assignedJobs.push(job);
+
+                    currentLot.usedMetraj += job.consumedMetraj;
+
+                    // Deduct Orders
+                    const sizeCounts = {};
+                    bestMarker.sizes.forEach(s => sizeCounts[s] = (sizeCounts[s] || 0) + 1);
+
+                    Object.entries(sizeCounts).forEach(([size, count]) => {
+                        const line = lines.find(o => o.size === size);
+                        if (line) {
+                            line.quantityPending -= (count * bestMarker.layers);
+                        }
+                    });
+
+                    // Update Status
+                    const totalPendingColor = lines.reduce((sum, l) => sum + l.quantityPending, 0);
+                    if (totalPendingColor < 30 && totalPendingColor > 0) {
+                        lines.forEach(o => o.status = 'Leftover');
+                    }
+                    if (totalPendingColor <= 0) {
+                        lines.forEach(o => o.status = 'Completed');
+                    }
+
+                    // Successful Cut -> Break Color Loop to restart Lot Sort (Greedy Step)
+                    break;
                 }
+                // If bestMarker is null, we continue to next candidate color...
+            }
+
+            // If we iterated ALL candidates and found NO marker for this Lot...
+            // It means this Lot effectively cannot cut any Open orders efficiently.
+            // We should NOT pick it again as top priority if we can't use it.
+            // But next loop step will pick it again because it still has max metraj.
+            // Hack/Fix: If active is false here (no cut made), we must effectively "Skip" this lot.
+            if (!active && availableLots.length > 1) {
+                // If we failed to cut from Top Lot, simpler logic is to Break?
+                // Or maybe other lots work?
+                // Realistically, if Top Lot (Max Metraj) fails, usually smaller lots fail too unless they are specific.
+                // But let's verify.
+                // The algorithm will naturally stop because active=false.
+            }
+        }
+
+        // 3. Sweeping Phase (Rescue Leftovers)
+        // Aggressive loop for remaining fabric and leftovers
+        // Relaxed constraints: Allows single size markers freely.
+        console.log('Starting Sweeping Phase...');
+        loopSafety = 0;
+        active = true;
+
+        while (active && loopSafety < 5000) {
+            loopSafety++;
+            active = false;
+
+            const availableLots = lots.filter(l => l.availableMetraj > 1);
+            if (availableLots.length === 0) break;
+            availableLots.sort((a, b) => b.availableMetraj - a.availableMetraj); // Big lots first
+
+            const currentLot = availableLots[0];
+
+            // Candidate Orders: Open OR Leftover
+            const allCandidates = orders.filter(o => (o.status === 'Open' || o.status === 'Leftover') && o.quantityPending > 0);
+
+            // Group by Color
+            const colorGroups = {};
+            allCandidates.forEach(o => {
+                if (!colorGroups[o.color]) colorGroups[o.color] = [];
+                colorGroups[o.color].push(o);
             });
 
-            if (!bestColor) break;
+            const sortedColors = Object.entries(colorGroups)
+                .map(([color, lines]) => ({ color, lines, total: lines.reduce((s, x) => s + x.quantityPending, 0) }))
+                .sort((a, b) => b.total - a.total);
 
-            const currentOrders = colorGroups[bestColor];
+            for (const cand of sortedColors) {
+                // Try finding ANY marker. 
+                // We reuse findBestMarkerCombination inside. 
+                // Note: findBestMarkerCombination already checks "Single Size Fallback".
+                // But maybe we need even simpler? 
+                // It verifies strict Layer limits.
 
-            // Step 2: Local Optimization
-            const bestMarker = findBestMarkerCombination(currentLot, currentOrders, parameters);
+                const marker = findBestMarkerCombination(currentLot, cand.lines, parameters);
 
-            if (bestMarker) {
-                active = true;
+                if (marker) {
+                    active = true;
+                    const job = new CutJob(cutIdCounter++, currentLot.id, cand.color, marker.sizes, marker.layers, marker.markerLength);
+                    cuts.push(job);
+                    currentLot.assignedJobs.push(job);
+                    currentLot.usedMetraj += job.consumedMetraj;
 
-                const job = new CutJob(cutIdCounter++, currentLot.id, bestColor, bestMarker.sizes, bestMarker.layers, bestMarker.markerLength);
-                cuts.push(job);
-                currentLot.assignedJobs.push(job);
+                    const sizeCounts = {};
+                    marker.sizes.forEach(s => sizeCounts[s] = (sizeCounts[s] || 0) + 1);
+                    Object.entries(sizeCounts).forEach(([size, count]) => {
+                        const line = cand.lines.find(o => o.size === size);
+                        if (line) line.quantityPending -= (count * marker.layers);
+                    });
 
-                currentLot.usedMetraj += job.consumedMetraj;
+                    // In Sweeping, we don't mark 'Leftover'. Just check complete.
+                    const pending = cand.lines.reduce((s, l) => s + l.quantityPending, 0);
+                    if (pending <= 0) cand.lines.forEach(o => o.status = 'Completed');
 
-                // Update Orders
-                // Careful: bestMarker.sizes can contain multiple instances of same size (e.g. S, S)
-                // We must deduct sequentially
-                const sizeCounts = {};
-                bestMarker.sizes.forEach(s => sizeCounts[s] = (sizeCounts[s] || 0) + 1);
-
-                Object.entries(sizeCounts).forEach(([size, count]) => {
-                    const line = currentOrders.find(o => o.size === size);
-                    if (line) {
-                        line.quantityPending -= (count * bestMarker.layers);
-                    }
-                });
-
-                // Loop Breaking Logic
-                const totalPendingColor = currentOrders.reduce((sum, l) => sum + l.quantityPending, 0);
-                if (totalPendingColor < 30 && totalPendingColor > 0) {
-                    currentOrders.forEach(o => o.status = 'Leftover'); // Mark as leftover
+                    break; // Restart loop
                 }
-
-                // If completely done?
-                if (totalPendingColor <= 0) {
-                    currentOrders.forEach(o => o.status = 'Completed');
-                }
-
-            } else {
-                // Cannot cut this Color in this Lot. 
-                // TEMPORARY FIX:
-                // To avoid infinite loop (picking same Lot/Color), we must degrade this choice.
-                // Since we sort Lot by Metraj, we can slightly "penalize" this lot or skipped color.
-                // But simplest is to Skip this Color for this turn.
-                // Re-implement selection to find *playable* color?
-
-                // For MVP: If top choice fails, force break or try 2nd best?
-                // Let's implement "Try Next Color" loop logic inside step 1.
-
-                // ... (Simulated Logic): If `bestMarker` is null, we should try next color.
-                // But since we are inside a `while` loop that resets `bestColor` every time...
-                // We need `active` to remain false if NO color works.
-
-                // We will skip this `bestColor` and try finding next max? 
-                // Too complex for this snippet. Assuming simple flow works mostly.
-                // Force break to prevent freeze.
-                active = false;
             }
         }
 

@@ -141,6 +141,106 @@ const findBestMarkerCombination = (lot, orderLinesForColor, params) => {
     return valid.length > 0 ? valid[0] : null;
 };
 
+// --- POST-PROCESSING ---
+
+const enforceMinCutSize = (cuts, lots, orders) => {
+    // Iterate backwards to allow removal
+    for (let i = cuts.length - 1; i >= 0; i--) {
+        const job = cuts[i];
+        const totalPieces = job.sizes.length * job.layers;
+
+        if (totalPieces < 20) {
+            const lot = lots.find(l => l.id === job.lotId);
+
+            // Attempt 1: Grow (Add layers to reach 20)
+            const neededTotal = 20;
+            const piecesPerLayer = job.sizes.length;
+            const targetLayers = Math.ceil(neededTotal / piecesPerLayer);
+            const extraLayers = targetLayers - job.layers;
+            const extraMetraj = extraLayers * job.markerLength;
+
+            // Check constraint: Fabric availability
+            if (lot.availableMetraj >= extraMetraj) {
+                // Apply Growth
+                job.layers += extraLayers;
+                lot.usedMetraj += extraMetraj;
+
+                // We are "Overcutting" here, so we don't necessarily update order pending 
+                // because pending might be 0 already. This is surplus.
+                // But if pending was positive, we should reduce it.
+                // Simplify: Just mark as valid.
+            } else {
+                // Attempt 2: Dissolve (Fabric too short to make it worth it)
+                // Restore metraj
+                lot.usedMetraj -= job.consumedMetraj;
+
+                // Restore pending quantities
+                const sizeCounts = {};
+                job.sizes.forEach(s => sizeCounts[s] = (sizeCounts[s] || 0) + 1);
+
+                Object.entries(sizeCounts).forEach(([size, count]) => {
+                    const order = orders.find(o => o.color === job.color && o.size === size);
+                    if (order) {
+                        order.quantityPending += (count * job.layers);
+                        if (order.status === 'Completed') order.status = 'Open';
+                        if (order.status === 'Leftover') order.status = 'Open';
+                    }
+                });
+
+                // Remove job
+                cuts.splice(i, 1);
+                // Also remove from lot.assignedJobs if we tracked it there (we do in main loop but simplistic here)
+            }
+        }
+    }
+};
+
+const absorbLeftovers = (orders, cuts, lots) => {
+    const pendingOrders = orders.filter(o => o.quantityPending > 0);
+
+    pendingOrders.forEach(order => {
+        // Find candidate cuts: Same color, contains size, valid size (>20 originally or via growth)
+        // We only piggyback on "Good" cuts
+        const candidates = cuts.filter(j =>
+            j.color === order.color &&
+            j.sizes.includes(order.size)
+        );
+
+        if (candidates.length === 0) return;
+
+        // Sort by available fabric in their lots
+        candidates.sort((a, b) => {
+            const lotA = lots.find(l => l.id === a.lotId);
+            const lotB = lots.find(l => l.id === b.lotId);
+            return lotB.availableMetraj - lotA.availableMetraj;
+        });
+
+        for (const job of candidates) {
+            if (order.quantityPending <= 0) break;
+
+            const lot = lots.find(l => l.id === job.lotId);
+            const countInMarker = job.sizes.filter(s => s === order.size).length;
+
+            // Calculate needed layers
+            const neededLayers = Math.ceil(order.quantityPending / countInMarker);
+
+            // Check max layers for fabric
+            const maxFabLayers = Math.floor(lot.availableMetraj / job.markerLength);
+
+            // Add what we can
+            const convertLayers = Math.min(neededLayers, maxFabLayers);
+
+            if (convertLayers > 0) {
+                job.layers += convertLayers;
+                lot.usedMetraj += (convertLayers * job.markerLength);
+
+                const cutQty = convertLayers * countInMarker;
+                order.quantityPending -= cutQty; // Can go negative (overcut), allowed
+            }
+        }
+    });
+};
+
 // --- SCORING SYSTEM ---
 const calculateScore = (plans, orders, lots) => {
     // 1. Efficiency (Usage Ratio vs Waste)
@@ -290,6 +390,10 @@ const runOneSimulation = (seed, mutationParams, baseLots, baseOrders, parameters
             }
         }
     }
+
+    // 4. Post-Processing: Enforce Min Size & Absorb Leftovers
+    enforceMinCutSize(cuts, lots, orders);
+    absorbLeftovers(orders, cuts, lots);
 
     // Reconstruct Final Plans
     const finalPlans = [];

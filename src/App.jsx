@@ -8,7 +8,7 @@ import DataEntryContainer from './components/data-entry/DataEntryContainer'
 import ResultsView from './components/optimization/ResultsView'
 import AdminDashboard from './components/admin/AdminDashboard'
 import { generateSummary } from './utils/OptimizationEngine'
-import { solveCuttingStockGA } from './utils/OptimizationEngineGA'
+import { solveAsorti } from './utils/asortiClient'
 
 function App() {
   const [user, setUser] = useState(null)
@@ -79,61 +79,42 @@ function App() {
 
 
   const handlePreparePlan = async (data) => {
-    const { orderRows, groupingResults } = data
+    const { orderRows, fabricRows, groupingResults } = data
     if (!groupingResults) { alert("Lütfen kumaşları gruplandırın!"); return; }
+    if (!fabricRows || fabricRows.length === 0) { alert("Kumaş verisi yok!"); return; }
 
     try {
       setIsOptimizing(true)
 
-      // RUN GENETIC ALGORITHM IN WORKER
-      const { plans, integrityMap } = await solveCuttingStockGA(data)
+      const { plans, integrityMap, asortiMatrix, allocation, stats } = await solveAsorti(data)
 
-      console.log('✅ GA Engine Sonuçları:', plans)
+      console.log('✅ Asorti Engine Sonuçları:', plans, stats)
 
-      // ✅ 12. ÖZET RAPOR OLUŞTUR
       const summary = generateSummary(orderRows, plans, integrityMap)
 
-      // ✅ 13. LOGLAMA
       if (user) {
-        const totalPlannedCount = summary.reduce((acc, row) =>
-          acc + Object.values(row.planned).reduce((a, b) => a + b, 0), 0
-        )
         await supabase.from('logs').insert([{
           user_id: user.id,
-          action: 'OPTIMIZATION_RUN_GA',
+          action: 'OPTIMIZATION_RUN_ASORTI',
           details: {
             plans_count: plans.length,
-            total_pieces: totalPlannedCount,
+            total_pieces: stats.planned,
             customer: selectedCustomer?.name,
-            extra_percentage: 0
+            overcut: stats.overcut,
+            undercut: stats.undercut
           }
         }])
       }
 
-      console.log('📊 Özet Rapor:', summary)
-
-      const totalInitialMetraj = [
-        ...groupingResults.kalip1,
-        ...groupingResults.kalip2,
-        ...groupingResults.kalip3
-      ].reduce((sum, lot) => sum + (lot.totalMetraj || 0), 0)
-
-      const totalUsedMetraj = plans.reduce((sum, plan) => {
-        return sum + (plan.totalLayers * parseFloat(plan.markerLength))
-      }, 0)
-      const totalRemainingMetraj = totalInitialMetraj - totalUsedMetraj
-
       const metrajInfo = {
-        initial: totalInitialMetraj.toFixed(2),
-        used: totalUsedMetraj.toFixed(2),
-        remaining: totalRemainingMetraj.toFixed(2),
-        usagePercent: totalInitialMetraj > 0 ? ((totalUsedMetraj / totalInitialMetraj) * 100).toFixed(1) : 0
+        initial: stats.availableMetraj.toFixed(2),
+        used: stats.usedMetraj.toFixed(2),
+        remaining: (stats.availableMetraj - stats.usedMetraj).toFixed(2),
+        usagePercent: stats.utilization
       }
 
-      console.log('📏 Kumaş Kullanımı:', metrajInfo)
-
       setResults(plans)
-      setOptimizationSummary({ summary, metrajInfo })
+      setOptimizationSummary({ summary, metrajInfo, asortiMatrix, allocation, stats })
       navigate('/results')
 
     } catch (error) {

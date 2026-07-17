@@ -83,8 +83,10 @@ const KalipTable = ({ title, data, totalMetraj, colorClass }) => (
     </div>
 )
 
+const GROUP_COLORS = ['bg-emerald-500', 'bg-amber-500', 'bg-rose-500', 'bg-blue-500', 'bg-purple-500', 'bg-cyan-500']
+
 export default function FabricGroupingModal({ results, onClose }) {
-    if (!results) return null
+    if (!results || !results.groups) return null
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 md:p-12 bg-slate-900/80 backdrop-blur-md animate-in fade-in duration-300">
@@ -95,7 +97,7 @@ export default function FabricGroupingModal({ results, onClose }) {
                             <Layers className="text-emerald-500 w-10 h-10" />
                             Çekme Bazında Gruplandırma
                         </h2>
-                        <p className="text-slate-500 font-medium ml-1">Kumaşların tolerans değerlerine göre Kalıp-1 ve Kalıp-2 dağılımı.</p>
+                        <p className="text-slate-500 font-medium ml-1">Her benzersiz çekme kodu bir kalıp grubudur; farklı çekmeler asla aynı pastalda birleşmez.</p>
                     </div>
                     <button onClick={onClose} className="p-3 bg-white hover:bg-slate-100 rounded-2xl transition-all text-slate-400 hover:text-slate-900 border border-slate-200 shadow-sm active:scale-95">
                         <X size={28} />
@@ -103,33 +105,22 @@ export default function FabricGroupingModal({ results, onClose }) {
                 </div>
 
                 <div className="p-8 pt-4 overflow-y-auto flex-1 space-y-4">
-                    <KalipTable
-                        title="KALIP - 1 (0-5% Tolerans)"
-                        data={results.kalip1}
-                        totalMetraj={results.kalip1Total}
-                        colorClass="bg-emerald-500"
-                    />
-
-                    <KalipTable
-                        title="KALIP - 2 (5-10% Tolerans)"
-                        data={results.kalip2}
-                        totalMetraj={results.kalip2Total}
-                        colorClass="bg-amber-500"
-                    />
-
-                    <KalipTable
-                        title="KALIP - 3 (10-15% Tolerans)"
-                        data={results.kalip3}
-                        totalMetraj={results.kalip3Total}
-                        colorClass="bg-rose-500"
-                    />
+                    {results.groups.map((group, idx) => (
+                        <KalipTable
+                            key={group.cekme}
+                            title={`KALIP: ${group.cekme}`}
+                            data={group.lots}
+                            totalMetraj={group.total}
+                            colorClass={GROUP_COLORS[idx % GROUP_COLORS.length]}
+                        />
+                    ))}
                 </div>
 
                 <div className="p-8 border-t border-slate-200 bg-white flex justify-between items-center">
                     <div className="flex gap-8">
                         <div className="flex flex-col">
                             <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">GENEL TOPLAM</span>
-                            <span className="text-3xl font-black text-slate-900">{(results.kalip1Total + results.kalip2Total + results.kalip3Total).toFixed(2)} m</span>
+                            <span className="text-3xl font-black text-slate-900">{results.grandTotal.toFixed(2)} m</span>
                         </div>
                     </div>
                     <button

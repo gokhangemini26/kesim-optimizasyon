@@ -1,0 +1,112 @@
+import { DEFAULT_ENGINE_PARAMS, makeCons, mulberry32 } from './common.js'
+import { buildPools } from './pools.js'
+import { allocateColors, buildGroupDemand } from './allocation.js'
+import { buildMainColumns } from './markers.js'
+import { buildRemainderColumns, mergeColumns } from './remainders.js'
+import { assignTops } from './fabrics.js'
+import { buildPlans, buildAsortiMatrix, buildIntegrityMap } from './distribute.js'
+
+export const runAsortiEngine = (input, options = {}) => {
+    const P = { ...DEFAULT_ENGINE_PARAMS, ...(options.engineParams || {}) }
+    const cons = makeCons(input.params || {})
+    const rng = options.rng || null
+
+    const pools = buildPools(input.fabricRows || [])
+    if (pools.subpools.size === 0) throw new Error('Kumaş verisi yok')
+
+    const alloc = allocateColors(input.orderRows || [], pools.lots, cons, {
+        override: options.allocationOverride || null,
+        rng
+    })
+    const demand = buildGroupDemand(input.orderRows || [], alloc.byColor)
+
+    const state = {
+        demand,
+        subpools: pools.subpools,
+        cekmeGroups: pools.cekmeGroups,
+        cons,
+        params: P,
+        rng
+    }
+
+    const { columns: mainCols, leftovers } = buildMainColumns(state)
+    const { columns: remCols, unfulfilled } = buildRemainderColumns(leftovers, state)
+
+    let columns = mergeColumns([...mainCols, ...remCols], pools.subpools, cons, P)
+    assignTops(columns, pools.subpools, cons)
+
+    const { plans, plannedByColor, demandOf } = buildPlans({
+        columns,
+        orderRows: input.orderRows,
+        byColor: alloc.byColor
+    })
+
+    let ordered = 0, planned = 0, overcut = 0, undercut = 0
+    Object.entries(demandOf).forEach(([color, sizes]) => {
+        Object.entries(sizes).forEach(([size, d]) => {
+            const p = plannedByColor[color]?.[size] || 0
+            ordered += d
+            planned += p
+            if (p > d) overcut += p - d
+            else undercut += d - p
+        })
+    })
+
+    const availableMetraj = [...pools.lots.values()].reduce((s, l) => s + l.total, 0)
+    const usedMetraj = plans.reduce((s, p) => s + p.totalLayers * parseFloat(p.markerLength), 0)
+    const totalLayers = plans.reduce((s, p) => s + p.totalLayers, 0)
+    const avgLayers = plans.length ? totalLayers / plans.length : 0
+
+    const overcutFree = ordered * P.overcutFreeRatio
+    const undercutFree = ordered * P.undercutFreeRatio
+    const score = 100000
+        - plans.length * 1000
+        - Math.max(0, undercut - undercutFree) * 300
+        - undercut * 8
+        - Math.max(0, overcut - overcutFree) * 80
+        - overcut * 5
+        + avgLayers * 2
+
+    return {
+        plans,
+        asortiMatrix: buildAsortiMatrix(plans),
+        integrityMap: buildIntegrityMap(plannedByColor, demandOf, alloc.byColor),
+        allocation: alloc.byColor,
+        unfulfilled,
+        stats: {
+            cuts: plans.length,
+            ordered,
+            planned,
+            overcut,
+            undercut,
+            avgLayers: Math.round(avgLayers * 10) / 10,
+            usedMetraj: Math.round(usedMetraj * 100) / 100,
+            availableMetraj: Math.round(availableMetraj * 100) / 100,
+            utilization: availableMetraj > 0 ? Math.round((usedMetraj / availableMetraj) * 1000) / 10 : 0,
+            score: Math.round(score * 10) / 10
+        }
+    }
+}
+
+export const runAsortiSearch = (input, options = {}) => {
+    const { iterations = 200, seed = 20260717, onProgress = null, ...rest } = options
+    let best = null
+    let lastError = null
+
+    for (let i = 0; i < iterations; i++) {
+        const rng = i === 0 ? null : mulberry32(seed + i * 7919)
+        try {
+            const res = runAsortiEngine(input, { ...rest, rng })
+            if (!best || res.stats.score > best.stats.score) {
+                best = res
+                best.iteration = i
+            }
+        } catch (err) {
+            lastError = err
+        }
+        if (onProgress && i % 20 === 0) onProgress(i, iterations)
+    }
+
+    if (!best) throw lastError || new Error('Hiçbir senaryo üretilemedi')
+    return best
+}

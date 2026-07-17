@@ -7,42 +7,8 @@ import FabricGroupingModal from '../optimization/FabricGroupingModal'
 const SIZE_TYPES = {
     TIP1: ['28/32', '29/32', '30/32', '31/32', '32/32', '33/32', '34/32', '36/32', '38/32', '30/34', '31/34', '32/34', '33/34', '34/34', '36/34', '38/34'],
     TIP2: ['2XS', 'XS', 'S', 'M', 'L', 'XL', '2XL', '3XL', '4XL'],
-    TIP3: ['44', '46', '48', '50', '52', '54', '56', '58', '60']
-}
-
-// ✅ ÇEKME PARSE FONKSİYONU - Excel formatını destekler
-const parseCekme = (value) => {
-    if (!value) return { en: 0, boy: 0 }
-
-    const str = String(value).trim().toUpperCase()
-
-    // Format 1: "E55 B6" veya "E5.5 B0.6" (Excel formatı)
-    const match1 = str.match(/E\s*(-?\d+\.?\d*)\s*B\s*(-?\d+\.?\d*)/)
-    if (match1) {
-        const en = parseFloat(match1[1]) / 10 // E55 → 5.5%
-        const boy = parseFloat(match1[2]) / 10 // B6 → 0.6%
-        return { en, boy }
-    }
-
-    // Format 2: Direkt sayısal değer (mevcut format)
-    const num = parseFloat(str)
-    if (!isNaN(num)) {
-        return { en: num, boy: num }
-    }
-
-    return { en: 0, boy: 0 }
-}
-
-// ✅ TOLERANS KONTROLÜ - Doğru mantık
-const isWithinTolerance = (cekmeValue, toleranceValue) => {
-    // Çekme değeri: -2%, Tolerans: ±2%
-    // Kabul aralığı: -4% ile 0% arası
-    const lowerBound = cekmeValue - toleranceValue
-    const upperBound = cekmeValue + toleranceValue
-
-    return (value) => {
-        return value >= lowerBound && value <= upperBound
-    }
+    TIP3: ['44', '46', '48', '50', '52', '54', '56', '58', '60'],
+    TIP4: ['29', '30', '31', '32', '33', '34', '35', '36', '38', '40', '42']
 }
 
 export default function DataEntryContainer({
@@ -74,65 +40,39 @@ export default function DataEntryContainer({
             return
         }
 
-        // ✅ 1. ÇEKME GROUPLARİ OLUŞTUR (0-5%, 5-10%, 10%+)
-        const groups = {
-            kalip1: {}, // 0-5%
-            kalip2: {}, // 5-10%
-            kalip3: {}  // 10%+
-        }
-        const totals = { k1: 0, k2: 0, k3: 0 }
+        // KALIP = ÇEKME KODU: Her benzersiz çekme değeri kendi kalıp grubudur (E55 B45, E55 B6...)
+        const byCekme = {}
 
         fabricRows.forEach((fabric, idx) => {
-            const parsed = parseCekme(fabric.en + ' ' + fabric.boy)
-
-            // Mutlak değerlerin en büyüğünü al (Hem en hem boy tolerans içinde olmalı)
-            const maxShrink = Math.max(Math.abs(parsed.en), Math.abs(parsed.boy))
-
-            let targetGroup = 'kalip3'
-            if (maxShrink <= 3) targetGroup = 'kalip1'
-            else if (maxShrink <= 6.0) targetGroup = 'kalip2'
-            // 6.1 ve üzeri kalip3
-
-            const lot = fabric.lot || 'BELİRSİZ'
-
-            // Lot grubu var mı?
-            if (!groups[targetGroup][lot]) {
-                groups[targetGroup][lot] = {
-                    lot: lot,
-                    fabrics: [],
-                    totalMetraj: 0,
-                    avgShrink: 0
-                }
-            }
-
+            const en = parseFloat(fabric.en) || 0
+            const boy = parseFloat(fabric.boy) || 0
+            const cekme = `E${Math.round(Math.abs(en) * 10)} B${Math.round(Math.abs(boy) * 10)}`
+            const lot = String(fabric.lot || 'BELİRSİZ').toUpperCase()
             const metraj = parseFloat(fabric.metraj) || 0
-            groups[targetGroup][lot].fabrics.push({ ...fabric, index: idx })
-            groups[targetGroup][lot].totalMetraj += metraj
 
-            // İstatistik için toplam
-            if (targetGroup === 'kalip1') totals.k1 += metraj
-            else if (targetGroup === 'kalip2') totals.k2 += metraj
-            else totals.k3 += metraj
+            if (!byCekme[cekme]) byCekme[cekme] = { cekme, lots: {}, total: 0 }
+            if (!byCekme[cekme].lots[lot]) {
+                byCekme[cekme].lots[lot] = { lot, fabrics: [], totalMetraj: 0 }
+            }
+            byCekme[cekme].lots[lot].fabrics.push({ ...fabric, index: idx })
+            byCekme[cekme].lots[lot].totalMetraj += metraj
+            byCekme[cekme].total += metraj
         })
 
-        // ✅ 2. SONUÇLARI DÜZENLE (Object -> Array)
+        const groups = Object.values(byCekme)
+            .map(g => ({
+                cekme: g.cekme,
+                lots: Object.values(g.lots).sort((a, b) => b.totalMetraj - a.totalMetraj),
+                total: g.total
+            }))
+            .sort((a, b) => b.total - a.total)
+
         const result = {
-            kalip1: Object.values(groups.kalip1).sort((a, b) => b.totalMetraj - a.totalMetraj),
-            kalip2: Object.values(groups.kalip2).sort((a, b) => b.totalMetraj - a.totalMetraj),
-            kalip3: Object.values(groups.kalip3).sort((a, b) => b.totalMetraj - a.totalMetraj),
-            kalip1Total: totals.k1,
-            kalip2Total: totals.k2,
-            kalip3Total: totals.k3
+            groups,
+            grandTotal: groups.reduce((s, g) => s + g.total, 0)
         }
 
-        // Optimizasyon motoru için düz liste
-        result.allGroups = [
-            ...result.kalip1,
-            ...result.kalip2,
-            ...result.kalip3
-        ]
-
-        console.log('📊 Tolerans Bazlı Gruplama:', result)
+        console.log('📊 Çekme Kodu Bazlı Gruplama:', result)
 
         setGroupingResults(result)
         setShowGrouping(true)
@@ -150,6 +90,7 @@ export default function DataEntryContainer({
                     <option value="TIP1">TIP 1 (28/32 - 38/34)</option>
                     <option value="TIP2">TIP 2 (2XS-4XL)</option>
                     <option value="TIP3">TIP 3 (44-60)</option>
+                    <option value="TIP4">TIP 4 (29-42 Jean)</option>
                 </select>
             </div>
 
@@ -179,7 +120,7 @@ export default function DataEntryContainer({
             <div className="mt-12 flex justify-center">
                 <button
                     disabled={isOptimizing}
-                    onClick={() => onPreparePlan({ orderRows, groupingResults, consumptionMode, avgConsumption, sizeConsumptions })}
+                    onClick={() => onPreparePlan({ orderRows, fabricRows, groupingResults, consumptionMode, avgConsumption, sizeConsumptions })}
                     className={`bg-primary-600 hover:bg-primary-700 text-white font-black text-xl py-5 px-12 rounded-3xl shadow-2xl shadow-primary-200 transform transition-all ${isOptimizing ? 'opacity-50 cursor-wait' : 'hover:scale-105 active:scale-95'}`}
                 >
                     {isOptimizing ? 'HESAPLANIYOR...' : 'KESİM PLANI HAZIRLA'}

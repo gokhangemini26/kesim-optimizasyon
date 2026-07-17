@@ -10,6 +10,24 @@ const ALL = [
     ...CASES
 ]
 
+const lotMixStats = (plans) => {
+    let mixed = 0
+    let totalLots = 0
+    let maxLots = 0
+    plans.forEach(p => {
+        const n = new Set(p.blocks.map(b => b.lot)).size
+        if (n > 1) mixed++
+        totalLots += n
+        if (n > maxLots) maxLots = n
+    })
+    return {
+        mixed, total: plans.length,
+        pct: plans.length ? Math.round((mixed / plans.length) * 1000) / 10 : 0,
+        avgLots: plans.length ? Math.round((totalLots / plans.length) * 100) / 100 : 0,
+        maxLots
+    }
+}
+
 const checkCriteria = (result, orderRows, allocation) => {
     const { plans, stats } = result
     const issues = []
@@ -48,17 +66,22 @@ for (const c of ALL) {
         if (err) { console.log(`  ${label}: HATA — ${err}`); return }
         const s = res.stats
         const issues = checkCriteria(res, c.orderRows, c.allocation)
+        const mix = lotMixStats(res.plans)
         console.log(`  ${label}: ${s.cuts} kesim, ${s.planned} adet (+${s.overcut}/−${s.undercut}), ort ${s.avgLayers} kat, kumaş %${s.utilization} | ${issues.length ? '⚠ ' + issues.join('; ') : 'TÜM KRİTERLER ✓'}`)
+        console.log(`      LOT KARIŞIMI: ${mix.mixed}/${mix.total} kesim çok-lotlu (%${mix.pct}), ort ${mix.avgLots} lot/kesim, en fazla ${mix.maxLots} lot bir kesimde`)
         res.plans.forEach(p => {
             const blocks = p.blocks.map(b => `${b.lot}:${b.layers}`).join(' ')
             console.log(`      #${p.id} [${p.mold}] ${Object.entries(p.markerRatio).map(([sz, m]) => `${m}×${sz}`).join(' + ')} → ${p.totalLayers} kat (${blocks})`)
         })
+        return mix
     }
-    report('MOTOR (insan tahsisi)', over, overErr)
+    const overMix = report('MOTOR (insan tahsisi)', over, overErr)
     if (auto && !autoErr) {
         const s = auto.stats
         const issues = checkCriteria(auto, c.orderRows, c.allocation)
+        const mix = lotMixStats(auto.plans)
         console.log(`  MOTOR (oto tahsis)  : ${s.cuts} kesim, ${s.planned} adet (+${s.overcut}/−${s.undercut}) | tahsis: ${JSON.stringify(auto.allocation)} | ${issues.filter(i => !i.startsWith('renk')).length ? '⚠' : '✓'}`)
+        console.log(`      LOT KARIŞIMI: ${mix.mixed}/${mix.total} kesim çok-lotlu (%${mix.pct}), ort ${mix.avgLots} lot/kesim`)
     } else if (autoErr) {
         console.log(`  MOTOR (oto tahsis)  : HATA — ${autoErr}`)
     }

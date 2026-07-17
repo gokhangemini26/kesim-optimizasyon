@@ -36,7 +36,8 @@ export const buildRemainderColumns = (leftovers, state) => {
 }
 
 const tryMerge = (A, B, subpools, cons, P) => {
-    if (A.cekme !== B.cekme) return null
+    const cross = A.cekme !== B.cekme
+    if (cross && P.allowCrossCekme === false) return null
 
     const sizesA = Object.keys(A.ratio)
     const sizesB = Object.keys(B.ratio)
@@ -68,20 +69,26 @@ const tryMerge = (A, B, subpools, cons, P) => {
     const lenA = markerLengthOf(A.ratio, cons)
     const lenB = markerLengthOf(B.ratio, cons)
     const extraByLot = {}
+    const refundByLot = {}
     for (const lot of lotsU) {
         const la = layersA[lot] || 0
         const lb = layersB[lot] || 0
-        const extra = merged[lot] * (lenA + lenB) - (la * lenA + lb * lenB)
+        // Birleşik kolon A'nın çekmesinde kesilir; B'nin blokları çapraz geliyorsa
+        // B'nin eski havuzuna iade edilir, A'nın havuzundan tüketilir.
+        const alreadyInA = la * lenA + (cross ? 0 : lb * lenB)
+        const extra = merged[lot] * (lenA + lenB) - alreadyInA
         const sp = subpools.get(subpoolKey(lot, A.cekme))
         if (!sp || sp.remaining < extra) return null
         extraByLot[lot] = extra
+        if (cross && lb > 0) refundByLot[lot] = lb * lenB
     }
 
-    return { merged, extraByLot, overcutAdded }
+    return { merged, extraByLot, refundByLot, sourceCekme: B.cekme, overcutAdded, penalty: overcutAdded + (cross ? 0.5 : 0) }
 }
 
 const tryAbsorb = (A, B, subpools, cons, P) => {
-    if (A.cekme !== B.cekme) return null
+    const cross = A.cekme !== B.cekme
+    if (cross && P.allowCrossCekme === false) return null
     const sizesA = Object.keys(A.ratio)
     const sizesB = Object.keys(B.ratio)
     if (sizesA.length !== 1 || sizesB.length !== 1 || sizesA[0] !== sizesB[0]) return null
@@ -99,16 +106,23 @@ const tryAbsorb = (A, B, subpools, cons, P) => {
         const pieces = mB * bb.layers
         const extraLayers = Math.ceil(pieces / mA)
         const sp = subpools.get(subpoolKey(bb.lot, A.cekme))
-        const netMetraj = extraLayers * mA * len1 - bb.layers * mB * len1
-        if (!sp || sp.remaining < netMetraj) return null
+        const consume = cross
+            ? extraLayers * mA * len1
+            : extraLayers * mA * len1 - bb.layers * mB * len1
+        if (!sp || sp.remaining < consume) return null
         extraLayersTotal += extraLayers
         overcutAdded += extraLayers * mA - pieces
-        moves.push({ lot: bb.lot, extraLayers, netMetraj })
+        moves.push({
+            lot: bb.lot,
+            extraLayers,
+            netMetraj: consume,
+            refund: cross ? bb.layers * mB * len1 : 0
+        })
     }
 
     if (totalA + extraLayersTotal > P.maxLayers) return null
     if (overcutAdded > P.mergeOvercutMax) return null
-    return { absorb: true, moves, overcutAdded }
+    return { absorb: true, moves, sourceCekme: B.cekme, overcutAdded, penalty: overcutAdded + (cross ? 0.5 : 0) }
 }
 
 export const mergeColumns = (columns, subpools, cons, P) => {
@@ -120,11 +134,12 @@ export const mergeColumns = (columns, subpools, cons, P) => {
             for (let j = i + 1; j < cols.length; j++) {
                 const candidates = [
                     { t: tryMerge(cols[i], cols[j], subpools, cons, P), hostIdx: i, otherIdx: j },
+                    { t: tryMerge(cols[j], cols[i], subpools, cons, P), hostIdx: j, otherIdx: i },
                     { t: tryAbsorb(cols[i], cols[j], subpools, cons, P), hostIdx: i, otherIdx: j },
                     { t: tryAbsorb(cols[j], cols[i], subpools, cons, P), hostIdx: j, otherIdx: i }
                 ]
                 for (const { t, hostIdx, otherIdx } of candidates) {
-                    if (t && (!best || t.overcutAdded < best.overcutAdded)) {
+                    if (t && (!best || t.penalty < best.penalty)) {
                         best = { ...t, i: hostIdx, j: otherIdx }
                     }
                 }
@@ -132,28 +147,38 @@ export const mergeColumns = (columns, subpools, cons, P) => {
         }
         if (!best) break
 
+        const host = cols[best.i]
+        const other = cols[best.j]
+
         if (best.absorb) {
-            const host = cols[best.i]
-            const other = cols[best.j]
-            best.moves.forEach(({ lot, extraLayers, netMetraj }) => {
+            best.moves.forEach(({ lot, extraLayers, netMetraj, refund }) => {
                 subpools.get(subpoolKey(lot, host.cekme)).remaining -= netMetraj
+                if (refund > 0) {
+                    const spOld = subpools.get(subpoolKey(lot, best.sourceCekme))
+                    if (spOld) spOld.remaining += refund
+                }
                 const block = host.blocks.find(b => b.lot === lot)
                 if (block) block.layers += extraLayers
                 else host.blocks.push({ lot, layers: extraLayers })
             })
             cols.splice(cols.indexOf(other), 1)
         } else {
-            const A = cols[best.i]
             Object.entries(best.extraByLot).forEach(([lot, extra]) => {
-                subpools.get(subpoolKey(lot, A.cekme)).remaining -= extra
+                subpools.get(subpoolKey(lot, host.cekme)).remaining -= extra
+            })
+            Object.entries(best.refundByLot || {}).forEach(([lot, refund]) => {
+                const spOld = subpools.get(subpoolKey(lot, best.sourceCekme))
+                if (spOld) spOld.remaining += refund
             })
             const mergedCol = {
-                cekme: A.cekme,
-                ratio: { ...A.ratio, ...cols[best.j].ratio },
+                cekme: host.cekme,
+                ratio: { ...host.ratio, ...other.ratio },
                 blocks: Object.entries(best.merged).map(([lot, layers]) => ({ lot, layers }))
             }
-            cols.splice(best.j, 1)
-            cols.splice(best.i, 1, mergedCol)
+            const jIdx = cols.indexOf(other)
+            const iIdx = cols.indexOf(host)
+            cols.splice(jIdx, 1)
+            cols.splice(jIdx < iIdx ? iIdx - 1 : iIdx, 1, mergedCol)
         }
     }
 

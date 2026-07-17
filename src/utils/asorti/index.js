@@ -18,7 +18,7 @@ export const runAsortiEngine = (input, options = {}) => {
         override: options.allocationOverride || null,
         rng
     })
-    const demand = buildGroupDemand(input.orderRows || [], alloc.byColor, pools.lots, cons)
+    const demand = buildGroupDemand(input.orderRows || [], alloc.byColor, pools.lots, cons, alloc.reserved || {})
 
     const state = {
         demand,
@@ -31,8 +31,30 @@ export const runAsortiEngine = (input, options = {}) => {
 
     const { columns: mainCols, leftovers } = buildMainColumns(state)
     const { columns: remCols, unfulfilled } = buildRemainderColumns(leftovers, state)
+    const rawCols = [...mainCols, ...remCols]
 
-    let columns = mergeColumns([...mainCols, ...remCols], pools.subpools, cons, P)
+    // İki birleştirme modunu da dene (saf / çapraz-çekme), az kesim vereni al.
+    const snapshot = () => new Map([...pools.subpools].map(([k, sp]) => [k, sp.remaining]))
+    const restore = (snap) => snap.forEach((rem, k) => { pools.subpools.get(k).remaining = rem })
+    const cloneCols = (cols) => cols.map(c => ({
+        cekme: c.cekme,
+        ratio: { ...c.ratio },
+        blocks: c.blocks.map(b => ({ ...b }))
+    }))
+
+    const before = snapshot()
+    const colsPure = mergeColumns(cloneCols(rawCols), pools.subpools, cons, { ...P, allowCrossCekme: false })
+    const afterPure = snapshot()
+    restore(before)
+    const colsCross = mergeColumns(cloneCols(rawCols), pools.subpools, cons, { ...P, allowCrossCekme: true })
+
+    let columns
+    if (colsPure.length <= colsCross.length) {
+        restore(afterPure)
+        columns = colsPure
+    } else {
+        columns = colsCross
+    }
     assignTops(columns, pools.subpools, cons)
 
     const { plans, plannedByColor, demandOf } = buildPlans({
@@ -63,7 +85,7 @@ export const runAsortiEngine = (input, options = {}) => {
         - plans.length * 1000
         - Math.max(0, undercut - undercutFree) * 300
         - undercut * 8
-        - Math.max(0, overcut - overcutFree) * 200
+        - Math.max(0, overcut - overcutFree) * 500
         - overcut * 5
         + avgLayers * 2
 
@@ -105,7 +127,8 @@ export const runAsortiSearch = (input, options = {}) => {
         const rng = i === 0 ? null : mulberry32(seed + i * 7919)
         let engineParams = baseEP
         if (rng && baseEP.mergeOvercutMax == null) {
-            engineParams = { ...baseEP, mergeOvercutMax: moChoices[Math.floor(rng() * moChoices.length)] }
+            const paramRng = mulberry32(seed + i * 104729 + 17)
+            engineParams = { ...baseEP, mergeOvercutMax: moChoices[Math.floor(paramRng() * moChoices.length)] }
         }
         try {
             const res = runAsortiEngine(input, { ...rest, engineParams, rng })

@@ -62,7 +62,7 @@ const checkCriteria = (result, { maxCuts, label }) => {
 }
 
 test('golden: insan tahsisi ile (TEMİZ/LOT1/LOT2) insan planı seviyesi', () => {
-    const result = runAsortiSearch(input, { iterations: 200, allocationOverride: humanAllocation })
+    const result = runAsortiSearch(input, { iterations: 400, allocationOverride: humanAllocation })
     console.log(`  [override] kesim: ${result.stats.cuts} (insan: ${HUMAN_PLAN.cuts}), planlanan: ${result.stats.planned}/${result.stats.ordered}, fazla: ${result.stats.overcut}, eksik: ${result.stats.undercut}, ort.kat: ${result.stats.avgLayers}, skor: ${result.stats.score}`)
     result.plans.forEach(p => {
         const blocks = p.blocks.map(b => `${b.lot}:${b.layers}`).join(' ')
@@ -72,7 +72,7 @@ test('golden: insan tahsisi ile (TEMİZ/LOT1/LOT2) insan planı seviyesi', () =>
 })
 
 test('golden: otomatik tahsis ile de kriterler sağlanır', () => {
-    const result = runAsortiSearch(input, { iterations: 200 })
+    const result = runAsortiSearch(input, { iterations: 400 })
     console.log(`  [auto] kesim: ${result.stats.cuts}, tahsis: ${JSON.stringify(result.allocation)}`)
     console.log(`  [auto] planlanan: ${result.stats.planned}/${result.stats.ordered}, fazla: ${result.stats.overcut}, eksik: ${result.stats.undercut}`)
     checkCriteria(result, { maxCuts: 14, label: 'auto' })

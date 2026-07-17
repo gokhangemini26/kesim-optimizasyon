@@ -61,10 +61,39 @@ export const allocateColors = (orderRows, lots, cons, { override = null, rng = n
         })
     })
 
-    return { byColor, groups }
+    // Bölünmüş renkler için lot bazında metraj rezervasyonu:
+    // tek-lotlu renkler kapasiteyi önce düşer, bölünmüşler kalanı sırayla alır.
+    const needOf = {}
+    orderRows.forEach(row => {
+        const color = String(row.color)
+        needOf[color] = Object.entries(row.quantities || {}).reduce(
+            (s, [sz, q]) => s + (parseInt(q) || 0) * cons(sz), 0
+        )
+    })
+    const capLeft = new Map(lotCodes.map(code => [code, lots.get(code)?.total || 0]))
+    Object.entries(byColor).forEach(([color, arr]) => {
+        if (arr.length === 1) capLeft.set(arr[0], (capLeft.get(arr[0]) || 0) - (needOf[color] || 0))
+    })
+    const reserved = {}
+    Object.entries(byColor)
+        .filter(([, arr]) => arr.length > 1)
+        .sort((a, b) => (needOf[b[0]] || 0) - (needOf[a[0]] || 0))
+        .forEach(([color, arr]) => {
+            reserved[color] = {}
+            let left = needOf[color] || 0
+            arr.forEach((lot, i) => {
+                const avail = Math.max(0, capLeft.get(lot) || 0)
+                const take = i === arr.length - 1 ? left : Math.min(left, avail)
+                reserved[color][lot] = take
+                capLeft.set(lot, (capLeft.get(lot) || 0) - take)
+                left -= take
+            })
+        })
+
+    return { byColor, groups, reserved }
 }
 
-export const buildGroupDemand = (orderRows, byColor, lots, cons) => {
+export const buildGroupDemand = (orderRows, byColor, lots, cons, reserved = {}) => {
     const demand = {}
     const add = (lot, size, q) => {
         if (!demand[lot]) demand[lot] = {}
@@ -86,7 +115,11 @@ export const buildGroupDemand = (orderRows, byColor, lots, cons) => {
 
         // Bölünmüş renk: bedenleri BÜTÜN halinde lotlara dağıt (insan planındaki gibi);
         // yalnızca hiçbir lota tam sığmayan beden mecburen bölünür.
-        const capLeft = new Map(assigned.map(lot => [lot, (lots.get(lot)?.total || 0) * 0.98]))
+        // Kapasite = tahsiste bu renge REZERVE edilen metraj (diğer renklerle çakışmayı önler).
+        const capLeft = new Map(assigned.map(lot => [
+            lot,
+            reserved[color]?.[lot] != null ? reserved[color][lot] : (lots.get(lot)?.total || 0) * 0.98
+        ]))
         const bySizeDesc = [...sizes].sort((a, b) => b[1] - a[1])
         bySizeDesc.forEach(([size, q]) => {
             const need = q * cons(size)

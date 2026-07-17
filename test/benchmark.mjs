@@ -52,7 +52,7 @@ for (const c of ALL) {
     const ordered = c.orderRows.reduce((s, r) => s + Object.values(r.quantities).reduce((a, b) => a + (parseInt(b) || 0), 0), 0)
     const fabric = c.fabricRows.reduce((s, f) => s + f.metraj, 0)
     const input = { orderRows: c.orderRows, fabricRows: c.fabricRows, params: c.params }
-    const opts = { iterations: 400, engineParams: c.engineParams || {} }
+    const opts = { iterations: 800, engineParams: c.engineParams || {} }
 
     let over, auto, overErr, autoErr
     try { over = runAsortiSearch(input, { ...opts, allocationOverride: c.allocation }) } catch (e) { overErr = e.message }

@@ -7,7 +7,7 @@ self.onmessage = (e) => {
         const result = runAsortiSearch(
             { orderRows, fabricRows, params: parameters },
             {
-                iterations: parameters?.iterations || 300,
+                iterations: parameters?.iterations || 600,
                 allocationOverride: allocationOverride || null,
                 onProgress: (i, total) => self.postMessage({ progress: { i, total } })
             }

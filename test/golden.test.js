@@ -20,16 +20,17 @@ const checkCriteria = (result, { maxCuts, label }) => {
 
     orderRows.forEach(row => {
         const color = String(row.color)
+        const allowed = new Set(String(allocation[color]).split('+'))
         const lotsUsed = new Set()
         plans.forEach(plan => {
             plan.rows.forEach(r => {
                 if (r.colors === color) lotsUsed.add(r.lot)
             })
         })
-        assert.ok(lotsUsed.size <= 1, `${label}: renk ${color} birden fazla lottan kesildi: ${[...lotsUsed]}`)
-        if (lotsUsed.size === 1) {
-            assert.equal([...lotsUsed][0], allocation[color], `${label}: renk ${color} tahsis edilen lottan kesilmedi`)
-        }
+        assert.ok(
+            [...lotsUsed].every(l => allowed.has(l)),
+            `${label}: renk ${color} tahsis dışı lottan kesildi: ${[...lotsUsed]} (izinli: ${[...allowed]})`
+        )
     })
 
     plans.forEach(plan => {

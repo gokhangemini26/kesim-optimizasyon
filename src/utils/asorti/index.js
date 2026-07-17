@@ -18,7 +18,7 @@ export const runAsortiEngine = (input, options = {}) => {
         override: options.allocationOverride || null,
         rng
     })
-    const demand = buildGroupDemand(input.orderRows || [], alloc.byColor)
+    const demand = buildGroupDemand(input.orderRows || [], alloc.byColor, pools.lots, cons)
 
     const state = {
         demand,
@@ -63,15 +63,20 @@ export const runAsortiEngine = (input, options = {}) => {
         - plans.length * 1000
         - Math.max(0, undercut - undercutFree) * 300
         - undercut * 8
-        - Math.max(0, overcut - overcutFree) * 80
+        - Math.max(0, overcut - overcutFree) * 200
         - overcut * 5
         + avgLayers * 2
+
+    const allocationOut = {}
+    Object.entries(alloc.byColor).forEach(([color, arr]) => {
+        allocationOut[color] = arr.join('+')
+    })
 
     return {
         plans,
         asortiMatrix: buildAsortiMatrix(plans),
-        integrityMap: buildIntegrityMap(plannedByColor, demandOf, alloc.byColor),
-        allocation: alloc.byColor,
+        integrityMap: buildIntegrityMap(plannedByColor, demandOf, allocationOut),
+        allocation: allocationOut,
         unfulfilled,
         stats: {
             cuts: plans.length,
@@ -93,10 +98,17 @@ export const runAsortiSearch = (input, options = {}) => {
     let best = null
     let lastError = null
 
+    const baseEP = rest.engineParams || {}
+    const moChoices = [4, 6, 8, 12]
+
     for (let i = 0; i < iterations; i++) {
         const rng = i === 0 ? null : mulberry32(seed + i * 7919)
+        let engineParams = baseEP
+        if (rng && baseEP.mergeOvercutMax == null) {
+            engineParams = { ...baseEP, mergeOvercutMax: moChoices[Math.floor(rng() * moChoices.length)] }
+        }
         try {
-            const res = runAsortiEngine(input, { ...rest, rng })
+            const res = runAsortiEngine(input, { ...rest, engineParams, rng })
             if (!best || res.stats.score > best.stats.score) {
                 best = res
                 best.iteration = i

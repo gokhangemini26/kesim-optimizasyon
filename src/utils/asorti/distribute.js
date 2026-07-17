@@ -26,9 +26,11 @@ export const buildPlans = ({ columns, orderRows, byColor }) => {
     const colorsByLot = {}
     orderRows.forEach(row => {
         const color = String(row.color)
-        const lot = byColor[color]
-        if (!colorsByLot[lot]) colorsByLot[lot] = []
-        colorsByLot[lot].push(color)
+        const lotsOfColor = Array.isArray(byColor[color]) ? byColor[color] : [byColor[color]]
+        lotsOfColor.forEach(lot => {
+            if (!colorsByLot[lot]) colorsByLot[lot] = []
+            colorsByLot[lot].push(color)
+        })
     })
     Object.values(colorsByLot).forEach(list =>
         list.sort((a, b) => {

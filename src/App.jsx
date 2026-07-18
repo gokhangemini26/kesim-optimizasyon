@@ -11,43 +11,113 @@ import { generateSummary } from './utils/OptimizationEngine'
 import { solveAsorti } from './utils/asortiClient'
 
 function App() {
-  const [user, setUser] = useState(null)
+  const [user, setUser] = useState({
+    id: 'local-user',
+    name: 'Yerel Kullanıcı',
+    is_admin: false
+  })
   const [isRegistering, setIsRegistering] = useState(false)
-  const [selectedCustomer, setSelectedCustomer] = useState(null)
-  const [results, setResults] = useState(null)
-  const [optimizationSummary, setOptimizationSummary] = useState(null)
+  const [selectedCustomer, setSelectedCustomer] = useState(() => {
+    const saved = localStorage.getItem('selectedCustomer')
+    return saved ? JSON.parse(saved) : null
+  })
+  const [results, setResults] = useState(() => {
+    const saved = localStorage.getItem('results')
+    return saved ? JSON.parse(saved) : null
+  })
+  const [optimizationSummary, setOptimizationSummary] = useState(() => {
+    const saved = localStorage.getItem('optimizationSummary')
+    return saved ? JSON.parse(saved) : null
+  })
   const [isOptimizing, setIsOptimizing] = useState(false)
   const navigate = useNavigate()
 
   // Lifted Data Entry States
-  const [orderRows, setOrderRows] = useState([])
-  const [fabricRows, setFabricRows] = useState([])
-  const [consumptionMode, setConsumptionMode] = useState('AVG')
-  const [avgConsumption, setAvgConsumption] = useState(1.4)
-  const [sizeConsumptions, setSizeConsumptions] = useState({})
-  const [sizeType, setSizeType] = useState('TIP1')
-  const [groupingResults, setGroupingResults] = useState(null)
+  const [orderRows, setOrderRows] = useState(() => {
+    const saved = localStorage.getItem('orderRows')
+    return saved ? JSON.parse(saved) : []
+  })
+  const [fabricRows, setFabricRows] = useState(() => {
+    const saved = localStorage.getItem('fabricRows')
+    return saved ? JSON.parse(saved) : []
+  })
+  const [consumptionMode, setConsumptionMode] = useState(() => {
+    const saved = localStorage.getItem('consumptionMode')
+    return saved || 'AVG'
+  })
+  const [avgConsumption, setAvgConsumption] = useState(() => {
+    const saved = localStorage.getItem('avgConsumption')
+    return saved ? parseFloat(saved) : 1.4
+  })
+  const [sizeConsumptions, setSizeConsumptions] = useState(() => {
+    const saved = localStorage.getItem('sizeConsumptions')
+    return saved ? JSON.parse(saved) : {}
+  })
+  const [sizeType, setSizeType] = useState(() => {
+    const saved = localStorage.getItem('sizeType')
+    return saved || 'TIP1'
+  })
+  const [groupingResults, setGroupingResults] = useState(() => {
+    const saved = localStorage.getItem('groupingResults')
+    return saved ? JSON.parse(saved) : null
+  })
+
+  // Synchronize states to localStorage
+  useEffect(() => {
+    if (selectedCustomer) {
+      localStorage.setItem('selectedCustomer', JSON.stringify(selectedCustomer))
+    } else {
+      localStorage.removeItem('selectedCustomer')
+    }
+  }, [selectedCustomer])
 
   useEffect(() => {
-    // Check for existing session
-    const checkSession = async () => {
-      const { data: { session } } = await supabase.auth.getSession()
-      if (session?.user) {
-        const { data: profile } = await supabase
-          .from('profiles')
-          .select('*')
-          .eq('id', session.user.id)
-          .single()
-
-        setUser({
-          ...session.user,
-          name: profile?.full_name || session.user.email,
-          is_admin: profile?.is_admin || false
-        })
-      }
+    if (results) {
+      localStorage.setItem('results', JSON.stringify(results))
+    } else {
+      localStorage.removeItem('results')
     }
-    checkSession()
-  }, [])
+  }, [results])
+
+  useEffect(() => {
+    if (optimizationSummary) {
+      localStorage.setItem('optimizationSummary', JSON.stringify(optimizationSummary))
+    } else {
+      localStorage.removeItem('optimizationSummary')
+    }
+  }, [optimizationSummary])
+
+  useEffect(() => {
+    localStorage.setItem('orderRows', JSON.stringify(orderRows))
+  }, [orderRows])
+
+  useEffect(() => {
+    localStorage.setItem('fabricRows', JSON.stringify(fabricRows))
+  }, [fabricRows])
+
+  useEffect(() => {
+    localStorage.setItem('consumptionMode', consumptionMode)
+  }, [consumptionMode])
+
+  useEffect(() => {
+    localStorage.setItem('avgConsumption', avgConsumption.toString())
+  }, [avgConsumption])
+
+  useEffect(() => {
+    localStorage.setItem('sizeConsumptions', JSON.stringify(sizeConsumptions))
+  }, [sizeConsumptions])
+
+  useEffect(() => {
+    localStorage.setItem('sizeType', sizeType)
+  }, [sizeType])
+
+  useEffect(() => {
+    if (groupingResults) {
+      localStorage.setItem('groupingResults', JSON.stringify(groupingResults))
+    } else {
+      localStorage.removeItem('groupingResults')
+    }
+  }, [groupingResults])
 
   const handleLogin = (userData) => {
     setUser(userData)
@@ -57,9 +127,7 @@ function App() {
     setUser(userData)
   }
 
-  const handleLogout = async () => {
-    await supabase.auth.signOut()
-    setUser(null)
+  const handleLogout = () => {
     setSelectedCustomer(null)
     setIsRegistering(false)
     setResults(null)
@@ -67,7 +135,13 @@ function App() {
     setOrderRows([])
     setFabricRows([])
     setGroupingResults(null)
-    navigate('/')
+    localStorage.removeItem('selectedCustomer')
+    localStorage.removeItem('results')
+    localStorage.removeItem('optimizationSummary')
+    localStorage.setItem('orderRows', JSON.stringify([]))
+    localStorage.setItem('fabricRows', JSON.stringify([]))
+    localStorage.removeItem('groupingResults')
+    navigate('/customers')
   }
 
   const handleSelectCustomer = (customer) => {
@@ -92,19 +166,7 @@ function App() {
 
       const summary = generateSummary(orderRows, plans, integrityMap)
 
-      if (user) {
-        await supabase.from('logs').insert([{
-          user_id: user.id,
-          action: 'OPTIMIZATION_RUN_ASORTI',
-          details: {
-            plans_count: plans.length,
-            total_pieces: stats.planned,
-            customer: selectedCustomer?.name,
-            overcut: stats.overcut,
-            undercut: stats.undercut
-          }
-        }])
-      }
+      // Logging skipped locally to bypass database integration
 
       const metrajInfo = {
         initial: stats.availableMetraj.toFixed(2),

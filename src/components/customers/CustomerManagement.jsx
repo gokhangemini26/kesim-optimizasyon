@@ -11,23 +11,15 @@ export default function CustomerManagement({ onSelectCustomer, onLogout }) {
 
     const fetchCustomers = async () => {
         setLoading(true)
-        const { data: { user } } = await supabase.auth.getUser()
-        if (user) {
-            const { data, error } = await supabase
-                .from('customers')
-                .select('*')
-                .eq('user_id', user.id)
-                .order('name')
-
-            if (!error) {
-                // Map snake_case DB columns to camelCase frontend state
-                const formattedData = data.map(c => ({
-                    ...c,
-                    enTolerance: c.en_tolerance,
-                    boyTolerance: c.boy_tolerance
-                }))
-                setCustomers(formattedData)
+        try {
+            const stored = localStorage.getItem('customers')
+            if (stored) {
+                setCustomers(JSON.parse(stored))
+            } else {
+                setCustomers([])
             }
+        } catch (err) {
+            console.error('Error fetching customers:', err)
         }
         setLoading(false)
     }
@@ -40,32 +32,27 @@ export default function CustomerManagement({ onSelectCustomer, onLogout }) {
         e.preventDefault()
         setError(null)
         try {
-            const { data: { user } } = await supabase.auth.getUser()
-            if (!user) throw new Error("Kullanıcı oturumu bulunamadı.")
-
-            const { error: insertError } = await supabase
-                .from('customers')
-                .insert([{
-                    name: formData.name,
-                    en_tolerance: formData.enTolerance,
-                    boy_tolerance: formData.boyTolerance,
-                    user_id: user.id
-                }])
-
-            if (insertError) throw insertError
-
-            fetchCustomers()
+            const newCustomer = {
+                id: 'cust-' + Date.now(),
+                name: formData.name,
+                enTolerance: formData.enTolerance,
+                boyTolerance: formData.boyTolerance
+            }
+            const updated = [...customers, newCustomer].sort((a, b) => a.name.localeCompare(b.name))
+            setCustomers(updated)
+            localStorage.setItem('customers', JSON.stringify(updated))
             setIsAdding(false)
             setFormData({ name: '', enTolerance: 2, boyTolerance: 3 })
         } catch (err) {
             console.error('Error adding customer:', err)
-            setError(err.message || "Müşteri eklenirken bir hata oluştu.")
+            setError("Müşteri eklenirken bir hata oluştu.")
         }
     }
 
     const handleDelete = async (id) => {
-        const { error } = await supabase.from('customers').delete().eq('id', id)
-        if (!error) fetchCustomers()
+        const updated = customers.filter(c => c.id !== id)
+        setCustomers(updated)
+        localStorage.setItem('customers', JSON.stringify(updated))
     }
 
     return (

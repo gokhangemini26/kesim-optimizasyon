@@ -8,6 +8,9 @@ export default function ResultsView({ plans, summary, onBack }) {
     // Handle both old format (array) and new format (object with summary and metrajInfo)
     const summaryData = Array.isArray(summary) ? summary : (summary?.summary || [])
     const metrajInfo = summary?.metrajInfo || null
+    const asorti = summary?.asortiMatrix || null
+    const allocation = summary?.allocation || null
+    const stats = summary?.stats || null
 
     // Global sizes across the entire order (from the summary)
     const globalSizes = summaryData && summaryData.length > 0
@@ -64,6 +67,30 @@ export default function ResultsView({ plans, summary, onBack }) {
         })
         const wsSummary = XLSX.utils.json_to_sheet(excelSummaryData)
         XLSX.utils.book_append_sheet(wb, wsSummary, "Ozet Rapor")
+
+        // Asorti Plani Sheet
+        if (asorti) {
+            const aoa = [
+                ['LOT / KESİM', ...asorti.columns.map(c => `#${c.id} ${c.label}`), 'TOPLAM'],
+                ['KALIP (ÇEKME)', ...asorti.columns.map(c => c.cekme), ''],
+                ...asorti.lotGroups.map(lot => {
+                    const cells = asorti.columns.map(c => asorti.layers[lot][c.id] || '')
+                    const rowTotal = asorti.columns.reduce((s, c) => s + (asorti.layers[lot][c.id] || 0), 0)
+                    return [lot, ...cells, rowTotal]
+                }),
+                ['TOPLAM KAT', ...asorti.columns.map(c => c.totalLayers), asorti.columns.reduce((s, c) => s + c.totalLayers, 0)],
+                ['TOPLAM ADET', ...asorti.columns.map(c => c.pieces), asorti.columns.reduce((s, c) => s + c.pieces, 0)]
+            ]
+            const wsAsorti = XLSX.utils.aoa_to_sheet(aoa)
+            XLSX.utils.book_append_sheet(wb, wsAsorti, "Asorti Plani")
+        }
+
+        // Renk-Lot Tahsis Sheet
+        if (allocation) {
+            const allocData = Object.entries(allocation).map(([color, lot]) => ({ 'RENK': color, 'LOT': lot }))
+            const wsAlloc = XLSX.utils.json_to_sheet(allocData)
+            XLSX.utils.book_append_sheet(wb, wsAlloc, "Renk-Lot Tahsis")
+        }
 
         // Individual Plans
         plans.forEach((plan, idx) => {
@@ -174,11 +201,23 @@ export default function ResultsView({ plans, summary, onBack }) {
                     <h1 className="text-3xl font-black text-slate-900">Hazırlanan Kesim Planları</h1>
                     <p className="text-slate-500">Toplam {plans.length} adet kesim planı oluşturuldu.</p>
 
-                    {/* %5 Fazla Bilgisi */}
-                    <div className="mt-3 flex items-center gap-2 bg-blue-50 text-blue-700 px-4 py-2 rounded-xl border border-blue-100 w-fit">
-                        <Info size={16} />
-                        <span className="text-sm font-bold">%5 Fazla Kesim Dahil Edildi</span>
-                    </div>
+                    {stats && (
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
+                            <div className="flex items-center gap-2 bg-blue-50 text-blue-700 px-4 py-2 rounded-xl border border-blue-100 w-fit">
+                                <Info size={16} />
+                                <span className="text-sm font-bold">{stats.cuts} Kesim · Ort. {stats.avgLayers} Kat</span>
+                            </div>
+                            <div className="flex items-center gap-2 bg-emerald-50 text-emerald-700 px-4 py-2 rounded-xl border border-emerald-100 w-fit">
+                                <span className="text-sm font-bold">Planlanan {stats.planned} / {stats.ordered}</span>
+                            </div>
+                            {stats.overcut > 0 && (
+                                <div className="bg-amber-50 text-amber-700 px-4 py-2 rounded-xl border border-amber-100 text-sm font-bold">+{stats.overcut} Fazla</div>
+                            )}
+                            {stats.undercut > 0 && (
+                                <div className="bg-red-50 text-red-700 px-4 py-2 rounded-xl border border-red-100 text-sm font-bold">−{stats.undercut} Eksik</div>
+                            )}
+                        </div>
+                    )}
                 </div>
                 <div className="flex gap-3">
                     <button onClick={exportToExcel} className="bg-white border border-slate-200 text-slate-700 font-bold py-3 px-6 rounded-2xl flex items-center gap-2 hover:bg-slate-50 transition-all shadow-sm">
@@ -192,6 +231,82 @@ export default function ResultsView({ plans, summary, onBack }) {
                 </div>
             </div>
 
+            {/* Renk → Lot Tahsis */}
+            {allocation && (
+                <div className="mb-8 bg-white rounded-3xl shadow-xl border border-slate-100 overflow-hidden">
+                    <div className="p-5 border-b border-slate-100 bg-slate-50/50">
+                        <h2 className="text-xl font-black text-slate-900">RENK → LOT TAHSİSİ</h2>
+                        <p className="text-xs text-slate-500 font-medium">Her renk tek lottan kesilir (ton farkı önlenir).</p>
+                    </div>
+                    <div className="p-5 flex flex-wrap gap-6">
+                        {[...new Set(Object.values(allocation))].sort().map(lot => (
+                            <div key={lot} className="flex items-center gap-3">
+                                <span className="bg-slate-900 text-white text-xs font-black px-3 py-1.5 rounded-lg">{lot}</span>
+                                <div className="flex flex-wrap gap-1.5">
+                                    {Object.entries(allocation).filter(([, l]) => l === lot).map(([color]) => (
+                                        <span key={color} className="bg-slate-100 text-slate-700 text-xs font-bold px-2.5 py-1 rounded-md border border-slate-200">{color}</span>
+                                    ))}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
+
+            {/* Asorti Planı Matrisi */}
+            {asorti && (
+                <div className="mb-12 bg-white rounded-3xl shadow-xl border border-slate-100 overflow-hidden">
+                    <div className="p-5 border-b border-yellow-500 bg-yellow-400 flex justify-between items-center">
+                        <h2 className="text-xl font-black text-slate-900">ASORTİ PLANI</h2>
+                        <span className="text-xs font-black text-slate-700">{asorti.columns.length} KESİM</span>
+                    </div>
+                    <div className="overflow-x-auto">
+                        <table className="w-full text-center border-collapse text-sm">
+                            <thead>
+                                <tr className="bg-slate-50 border-b border-slate-100">
+                                    <th className="p-3 text-left font-black text-slate-400 uppercase text-[10px] tracking-widest border-r border-slate-100">LOT / KESİM</th>
+                                    {asorti.columns.map(c => (
+                                        <th key={c.id} className="p-3 border-r border-slate-100 min-w-[90px]">
+                                            <div className="text-[9px] font-black text-slate-400">#{c.id} · {c.cekme}</div>
+                                            <div className="text-sm font-black text-slate-900 whitespace-nowrap">{c.label}</div>
+                                        </th>
+                                    ))}
+                                    <th className="p-3 font-black text-slate-900">TOPLAM</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {asorti.lotGroups.map(lot => {
+                                    const rowTotal = asorti.columns.reduce((s, c) => s + (asorti.layers[lot][c.id] || 0), 0)
+                                    return (
+                                        <tr key={lot} className="border-b border-slate-50 hover:bg-slate-50/50">
+                                            <td className="p-3 text-left font-black text-slate-900 border-r border-slate-100">{lot}</td>
+                                            {asorti.columns.map(c => (
+                                                <td key={c.id} className={`p-3 font-bold border-r border-slate-50 ${asorti.layers[lot][c.id] ? 'text-slate-900' : 'text-slate-300'}`}>
+                                                    {asorti.layers[lot][c.id] || '·'}
+                                                </td>
+                                            ))}
+                                            <td className="p-3 font-black text-primary-600">{rowTotal}</td>
+                                        </tr>
+                                    )
+                                })}
+                                <tr className="bg-slate-900 text-white font-black">
+                                    <td className="p-3 text-left text-[10px] uppercase tracking-widest">TOPLAM KAT / ADET</td>
+                                    {asorti.columns.map(c => (
+                                        <td key={c.id} className="p-3">
+                                            <div>{c.totalLayers}</div>
+                                            <div className="text-[10px] text-emerald-400">{c.pieces} ad</div>
+                                        </td>
+                                    ))}
+                                    <td className="p-3 text-emerald-400">
+                                        {asorti.columns.reduce((s, c) => s + c.pieces, 0)} ad
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            )}
+
             {/* Cutting Plans */}
             <div className="space-y-12">
                 {plans.map((group) => {
@@ -201,10 +316,10 @@ export default function ResultsView({ plans, summary, onBack }) {
 
                     return (
                         <div key={group.id} className="bg-white rounded-3xl shadow-xl border border-slate-100 overflow-hidden">
-                            <div className={`p-8 border-b border-slate-100 flex flex-col md:flex-row justify-between items-start md:items-center gap-6 ${group.mold === 'KALIP - 1' ? 'bg-emerald-50/30' : 'bg-amber-50/30'}`}>
+                            <div className={`p-8 border-b border-slate-100 flex flex-col md:flex-row justify-between items-start md:items-center gap-6 ${[...String(group.mold)].reduce((a, c) => a + c.charCodeAt(0), 0) % 2 === 0 ? 'bg-emerald-50/30' : 'bg-amber-50/30'}`}>
                                 <div>
                                     <div className="flex items-center gap-3 mb-2">
-                                        <span className={`text-[10px] font-black uppercase tracking-widest px-2 py-1 rounded-md text-white ${group.mold === 'KALIP - 1' ? 'bg-emerald-500' : 'bg-amber-500'}`}>
+                                        <span className={`text-[10px] font-black uppercase tracking-widest px-2 py-1 rounded-md text-white ${[...String(group.mold)].reduce((a, c) => a + c.charCodeAt(0), 0) % 2 === 0 ? 'bg-emerald-500' : 'bg-amber-500'}`}>
                                             KESİM #{group.id}
                                         </span>
                                         <h2 className="text-3xl font-black text-slate-900 tracking-tight">
@@ -403,11 +518,11 @@ export default function ResultsView({ plans, summary, onBack }) {
 
                                 <div className="flex items-center gap-8 bg-white/5 p-6 rounded-[30px] border border-white/10">
                                     <div className="text-right">
-                                        <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-[0.2em] block mb-1">FAZLA KESİLEN (%5)</span>
-                                        <span className="text-3xl font-black text-emerald-500">+{totalExtra}</span>
+                                        <span className={`text-[10px] font-bold uppercase tracking-[0.2em] block mb-1 ${totalExtra >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>FARK (PLAN − SİPARİŞ)</span>
+                                        <span className={`text-3xl font-black ${totalExtra >= 0 ? 'text-emerald-500' : 'text-red-500'}`}>{totalExtra >= 0 ? `+${totalExtra}` : totalExtra}</span>
                                     </div>
-                                    <div className="p-3 rounded-2xl shadow-xl bg-emerald-500 shadow-emerald-500/20">
-                                        <TrendingUp className="text-white w-8 h-8" />
+                                    <div className={`p-3 rounded-2xl shadow-xl ${totalExtra >= 0 ? 'bg-emerald-500 shadow-emerald-500/20' : 'bg-red-500 shadow-red-500/20'}`}>
+                                        {totalExtra >= 0 ? <TrendingUp className="text-white w-8 h-8" /> : <TrendingDown className="text-white w-8 h-8" />}
                                     </div>
                                 </div>
                             </div>

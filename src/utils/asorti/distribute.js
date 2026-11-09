@@ -40,6 +40,68 @@ export const buildPlans = ({ columns, orderRows, byColor }) => {
         })
     )
 
+    // Her beden için lot→renk kotası: üretilen adetler renklere MAKSİMUM AKIŞ ile paylaştırılır.
+    // (Eski açgözlü dağıtım, çok lotlu bir rengin tek lotlu rengin payını yemesine ve
+    //  lot bazında dengeli bir planın renk bazında eksik/fazla görünmesine yol açıyordu.)
+    const supply = {}
+    sorted.forEach(col => col.blocks.forEach(block => {
+        Object.entries(col.ratio).forEach(([size, m]) => {
+            if (!supply[size]) supply[size] = {}
+            supply[size][block.lot] = (supply[size][block.lot] || 0) + m * block.layers
+        })
+    }))
+    const quota = {}
+    Object.entries(supply).forEach(([size, byLot]) => {
+        const lotList = Object.keys(byLot)
+        const sup = lotList.map(l => byLot[l])
+        const colorList = [...new Set(lotList.flatMap(l => colorsByLot[l] || []))]
+            .filter(c => (demandOf[c]?.[size] || 0) > 0)
+        const dem = colorList.map(c => demandOf[c][size])
+        const allowed = lotList.map(l => colorList.map(c => (colorsByLot[l] || []).includes(c)))
+        const flow = lotList.map(() => colorList.map(() => 0))
+        // Önce tek seçenekli (tek lotlu) renkleri doyur, sonra artırıcı yollarla tamamla
+        const augment = (li, seen) => {
+            for (let ci = 0; ci < colorList.length; ci++) {
+                if (!allowed[li][ci] || seen.has(ci)) continue
+                seen.add(ci)
+                if (dem[ci] > 0) return [[li, ci]]
+                for (let lj = 0; lj < lotList.length; lj++) {
+                    if (lj === li || flow[lj][ci] <= 0) continue
+                    const path = augment(lj, seen)
+                    if (path) return [[li, ci], [lj, ci, true], ...path]
+                }
+            }
+            return null
+        }
+        const order = colorList.map((_, ci) => ci)
+            .sort((x, y) => allowed.filter(r => r[x]).length - allowed.filter(r => r[y]).length)
+        lotList.forEach((_, li) => {
+            for (const ci of order) {
+                if (!allowed[li][ci] || sup[li] <= 0 || dem[ci] <= 0) continue
+                const f = Math.min(sup[li], dem[ci])
+                flow[li][ci] += f; sup[li] -= f; dem[ci] -= f
+            }
+        })
+        lotList.forEach((_, li) => {
+            while (sup[li] > 0) {
+                const path = augment(li, new Set())
+                if (!path) break
+                let f = sup[li]
+                const end = path[path.length - 1]
+                f = Math.min(f, dem[end[1]])
+                path.forEach(([l, c, back]) => { if (back) f = Math.min(f, flow[l][c]) })
+                path.forEach(([l, c, back]) => { flow[l][c] += back ? -f : f })
+                sup[li] -= f
+                dem[end[1]] -= f
+            }
+        })
+        quota[size] = {}
+        lotList.forEach((l, li) => {
+            quota[size][l] = {}
+            colorList.forEach((c, ci) => { if (flow[li][ci] > 0) quota[size][l][c] = flow[li][ci] })
+        })
+    })
+
     const plannedByColor = {}
     const plans = []
 
@@ -53,11 +115,13 @@ export const buildPlans = ({ columns, orderRows, byColor }) => {
 
             Object.entries(col.ratio).forEach(([size, m]) => {
                 let pieces = m * block.layers
+                const q = quota[size]?.[block.lot] || {}
                 for (const color of colors) {
                     if (pieces <= 0) break
-                    const need = remaining[color]?.[size] || 0
+                    const need = q[color] || 0
                     if (need <= 0) continue
                     const give = Math.min(need, pieces)
+                    q[color] -= give
                     remaining[color][size] -= give
                     pieces -= give
                     if (!rowByColor[color]) rowByColor[color] = {}

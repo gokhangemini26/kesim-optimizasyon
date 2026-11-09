@@ -7,7 +7,10 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --test test/golden.test.js",
+    "benchmark": "node test/benchmark.mjs",
+    "simulate": "node test/simulate.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.89.0",
